@@ -50,7 +50,7 @@ func newTestApp(t *testing.T) *App {
 
 func newTestAppWithPassword(t *testing.T, password string) *App {
 	t.Helper()
-	app, err := New(config.Config{DataDir: t.TempDir(), Port: "0", OwnerPassword: password, MaxUploadMB: 32, ThumbWorkers: 1})
+	app, err := New(config.Config{DataDir: t.TempDir(), Port: "0", OwnerPassword: password, MaxUploadMB: 32, ThumbWorkers: 0})
 	if err != nil {
 		t.Fatal(err)
 	}

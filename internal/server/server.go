@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/brandon/fileament/internal/config"
 	"github.com/brandon/fileament/internal/storage"
@@ -20,8 +21,12 @@ import (
 var webFS embed.FS
 
 type App struct {
-	cfg config.Config
-	db  *sql.DB
+	cfg      config.Config
+	db       *sql.DB
+	stop     chan struct{}
+	workerWG sync.WaitGroup
+	eventsMu sync.Mutex
+	events   map[chan ThumbnailEvent]struct{}
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -40,15 +45,21 @@ func New(cfg config.Config) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db}
+	app := &App{cfg: cfg, db: db, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}}
 	if err := app.seedOwnerPassword(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	app.startWorkers()
 	return app, nil
 }
 
 func (a *App) Close() error {
+	if a.stop != nil {
+		close(a.stop)
+		a.workerWG.Wait()
+		a.stop = nil
+	}
 	if a.db != nil {
 		return a.db.Close()
 	}
@@ -65,6 +76,7 @@ func (a *App) Router() http.Handler {
 	r.Post("/api/auth/login", a.handleLogin)
 	r.Post("/api/auth/logout", a.handleLogout)
 	a.mountModelRoutes(r)
+	a.mountThumbRoutes(r)
 	r.Get("/*", a.serveSPA)
 	return r
 }
