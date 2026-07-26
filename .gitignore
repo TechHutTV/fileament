@@ -1,0 +1,9 @@
+.DS_Store
+Thumbs.db
+node_modules/
+web/node_modules/
+coverage/
+tmp/
+*.db
+*.db-shm
+*.db-wal

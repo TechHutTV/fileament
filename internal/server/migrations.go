@@ -1,0 +1,95 @@
+package server
+
+import "database/sql"
+
+func migrate(db *sql.DB) error {
+	_, err := db.Exec(schema)
+	return err
+}
+
+const schema = `
+CREATE TABLE IF NOT EXISTS models (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  source_url TEXT,
+  license TEXT,
+  author TEXT,
+  primary_thumb TEXT,
+  total_bytes INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  format TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT,
+  triangle_count INTEGER,
+  bbox_x REAL, bbox_y REAL, bbox_z REAL,
+  thumb_path TEXT,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS images (
+  id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  rel_path TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS collections (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  description TEXT DEFAULT '',
+  cover_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_models (
+  collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  sort_order INTEGER DEFAULT 0,
+  PRIMARY KEY (collection_id, model_id)
+);
+CREATE TABLE IF NOT EXISTS tags (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS model_tags (
+  model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (model_id, tag_id)
+);
+CREATE TABLE IF NOT EXISTS share_links (
+  id TEXT PRIMARY KEY,
+  token TEXT NOT NULL UNIQUE,
+  scope TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  label TEXT,
+  expires_at INTEGER,
+  revoked_at INTEGER,
+  hit_count INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  file_id TEXT,
+  status TEXT NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS models_fts USING fts5(title, description, tags, content='', tokenize='porter unicode61');
+`
