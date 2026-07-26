@@ -40,7 +40,12 @@ func New(cfg config.Config) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &App{cfg: cfg, db: db}, nil
+	app := &App{cfg: cfg, db: db}
+	if err := app.seedOwnerPassword(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return app, nil
 }
 
 func (a *App) Close() error {
@@ -55,6 +60,10 @@ func (a *App) Router() http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/api/me", a.handleMe)
+	r.Post("/api/auth/setup", a.handleSetup)
+	r.Post("/api/auth/login", a.handleLogin)
+	r.Post("/api/auth/logout", a.handleLogout)
 	r.Get("/*", a.serveSPA)
 	return r
 }

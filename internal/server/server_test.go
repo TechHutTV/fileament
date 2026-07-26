@@ -45,7 +45,12 @@ func TestSPAFallback(t *testing.T) {
 
 func newTestApp(t *testing.T) *App {
 	t.Helper()
-	app, err := New(config.Config{DataDir: t.TempDir(), Port: "0", MaxUploadMB: 32, ThumbWorkers: 1})
+	return newTestAppWithPassword(t, "")
+}
+
+func newTestAppWithPassword(t *testing.T, password string) *App {
+	t.Helper()
+	app, err := New(config.Config{DataDir: t.TempDir(), Port: "0", OwnerPassword: password, MaxUploadMB: 32, ThumbWorkers: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
