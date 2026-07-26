@@ -26,18 +26,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('renders setup and login flows', async () => {
+test('accepts an empty setup success response and transitions to login', async () => {
   const calls: string[] = [];
+  let setupComplete = false;
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
-    if (String(input).includes('/api/me')) return Response.json({ authenticated: false, setupRequired: true });
-    return new Response(null, { status: 201 });
+    if (String(input).includes('/api/me')) return Response.json({ authenticated: false, setupRequired: !setupComplete });
+    if (String(input).includes('/api/auth/setup')) {
+      setupComplete = true;
+      return new Response(null, { status: 201 });
+    }
+    return Response.json({});
   }));
   renderApp();
   expect(await screen.findByText('Set owner password')).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse password' } });
   fireEvent.click(screen.getByRole('button', { name: /create owner/i }));
   await waitFor(() => expect(calls).toContain('POST /api/auth/setup'));
+  expect(await screen.findByText('Owner login')).toBeInTheDocument();
+  expect(screen.queryByText('Authentication failed')).not.toBeInTheDocument();
 });
 
 test('catalog exposes filters, sorting, pagination, and owner nav', async () => {

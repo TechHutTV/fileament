@@ -360,9 +360,9 @@ function useDebounced(value: string, ms: number) {
 async function api(path: string, init: RequestInit = {}) {
   const headers = init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init.headers };
   const res = await fetch(path, { credentials: 'include', ...init, headers });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
+  const body = await res.text();
+  if (!res.ok) throw new Error(body);
+  return body ? JSON.parse(body) : null;
 }
 
 function navigate(path: string, replace = false) {
