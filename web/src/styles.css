@@ -147,7 +147,8 @@ label {
 
 .select select,
 label input,
-label textarea {
+label textarea,
+label select {
   background: color-mix(in srgb, currentColor 4%, transparent);
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   border-radius: 7px;
@@ -166,6 +167,31 @@ label textarea {
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+}
+
+.collection-models {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+}
+
+.collection-model {
+  display: grid;
+  gap: 8px;
+}
+
+.collection-model .card {
+  min-width: 0;
+}
+
+.collection-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.collection-actions button {
+  flex: 1;
+  justify-content: center;
 }
 
 .card {
@@ -203,6 +229,7 @@ label textarea {
 }
 
 .detail {
+  align-items: start;
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(0, 1fr) 360px;
@@ -214,7 +241,11 @@ label textarea {
 }
 
 .viewer {
+  height: calc(100vh - 69px);
+  max-height: 760px;
   min-height: 520px;
+  position: sticky;
+  top: 69px;
 }
 
 .panel {
@@ -406,7 +437,10 @@ label textarea {
   }
 
   .viewer {
+    height: 360px;
+    max-height: none;
     min-height: 360px;
+    position: static;
   }
 
   .panel {

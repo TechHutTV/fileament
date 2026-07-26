@@ -39,6 +39,46 @@ func (a *App) rebuildFromSidecars() error {
 	})
 }
 
+func (a *App) rebuildCollectionsFromSidecar() error {
+	path := filepath.Join(a.cfg.DataDir, "collections.json")
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var collections []Collection
+	if err := json.Unmarshal(b, &collections); err != nil {
+		return err
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, c := range collections {
+		if c.ID == "" || c.Name == "" || c.Slug == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO collections(id,name,slug,description,cover_model_id,created_at)
+VALUES(?,?,?,?,NULLIF(?,''),?)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, description=excluded.description, cover_model_id=excluded.cover_model_id`,
+			c.ID, c.Name, c.Slug, c.Description, c.CoverModelID, c.CreatedAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM collection_models WHERE collection_id = ?`, c.ID); err != nil {
+			return err
+		}
+		for order, modelID := range c.ModelIDs {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO collection_models(collection_id, model_id, sort_order) VALUES(?,?,?)`, c.ID, modelID, order); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 func (a *App) upsertSidecarModel(m Model) error {
 	tx, err := a.db.Begin()
 	if err != nil {

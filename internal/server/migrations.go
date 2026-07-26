@@ -1,10 +1,32 @@
 package server
 
-import "database/sql"
+import (
+	"database/sql"
+	"errors"
+)
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(schema)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version > 1 {
+		return errors.New("database schema is newer than this Fileament build")
+	}
+	if version == 0 {
+		if _, err := tx.Exec(schema); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`PRAGMA user_version = 1`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 const schema = `

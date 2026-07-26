@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,13 +17,14 @@ import (
 )
 
 type Collection struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	Slug         string  `json:"slug"`
-	Description  string  `json:"description"`
-	CoverModelID string  `json:"coverModelId,omitempty"`
-	CreatedAt    int64   `json:"createdAt"`
-	Models       []Model `json:"models,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Slug         string   `json:"slug"`
+	Description  string   `json:"description"`
+	CoverModelID string   `json:"coverModelId,omitempty"`
+	CreatedAt    int64    `json:"createdAt"`
+	ModelIDs     []string `json:"modelIds,omitempty"`
+	Models       []Model  `json:"models,omitempty"`
 }
 
 type ShareLink struct {
@@ -47,6 +49,7 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 		r.Delete("/api/collections/{id}", a.handleDeleteCollection)
 		r.Put("/api/collections/{id}/models/{mid}", a.handleAddCollectionModel)
 		r.Delete("/api/collections/{id}/models/{mid}", a.handleRemoveCollectionModel)
+		r.Put("/api/collections/{id}/order", a.handleReorderCollectionModels)
 		r.Get("/api/shares", a.handleListShares)
 		r.Post("/api/shares", a.handleCreateShare)
 		r.Delete("/api/shares/{id}", a.handleRevokeShare)
@@ -59,19 +62,50 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 }
 
 func (a *App) handleListCollections(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,name,slug,description,COALESCE(cover_model_id,''),created_at FROM collections ORDER BY name`)
+	out, err := a.listCollections()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer rows.Close()
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *App) listCollections() ([]Collection, error) {
+	rows, err := a.db.Query(`SELECT id,name,slug,description,COALESCE(cover_model_id,''),created_at FROM collections ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
 	var out []Collection
 	for rows.Next() {
 		var c Collection
-		_ = rows.Scan(&c.ID, &c.Name, &c.Slug, &c.Description, &c.CoverModelID, &c.CreatedAt)
+		if err := rows.Scan(&c.ID, &c.Name, &c.Slug, &c.Description, &c.CoverModelID, &c.CreatedAt); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
 		out = append(out, c)
 	}
-	writeJSON(w, http.StatusOK, out)
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	indexes := make(map[string]int, len(out))
+	for i := range out {
+		indexes[out[i].ID] = i
+	}
+	members, err := a.db.Query(`SELECT collection_id, model_id FROM collection_models ORDER BY collection_id, sort_order`)
+	if err != nil {
+		return nil, err
+	}
+	defer members.Close()
+	for members.Next() {
+		var collectionID, modelID string
+		if err := members.Scan(&collectionID, &modelID); err != nil {
+			return nil, err
+		}
+		if i, ok := indexes[collectionID]; ok {
+			out[i].ModelIDs = append(out[i].ModelIDs, modelID)
+		}
+	}
+	return out, members.Err()
 }
 
 func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
@@ -87,13 +121,16 @@ func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.CoverModelID != "" {
-		if _, err := a.getModel(c.CoverModelID); err != nil {
-			writeError(w, http.StatusNotFound, errors.New("cover model not found"))
-			return
-		}
+		writeError(w, http.StatusBadRequest, errors.New("add a model before selecting a cover"))
+		return
 	}
 	if _, err := a.db.Exec(`INSERT INTO collections(id,name,slug,description,cover_model_id,created_at) VALUES(?,?,?,?,NULLIF(?,''),?)`, c.ID, c.Name, c.Slug, c.Description, c.CoverModelID, c.CreatedAt); err != nil {
 		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		_, _ = a.db.Exec(`DELETE FROM collections WHERE id = ?`, c.ID)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, c)
@@ -115,17 +152,24 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Name != "" {
-		if req.CoverModelID != "" {
-			if _, err := a.getModel(req.CoverModelID); err != nil {
-				writeError(w, http.StatusNotFound, errors.New("cover model not found"))
-				return
-			}
-		}
-		if _, err := a.db.Exec(`UPDATE collections SET name=?, slug=?, description=?, cover_model_id=NULLIF(?, '') WHERE id=?`, req.Name, slugify(req.Name), req.Description, req.CoverModelID, id); err != nil {
-			writeError(w, http.StatusConflict, err)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, errors.New("name is required"))
+		return
+	}
+	if req.CoverModelID != "" {
+		if !a.collectionContains(id, req.CoverModelID) {
+			writeError(w, http.StatusBadRequest, errors.New("cover model must belong to the collection"))
 			return
 		}
+	}
+	if _, err := a.db.Exec(`UPDATE collections SET name=?, slug=?, description=?, cover_model_id=NULLIF(?, '') WHERE id=?`, req.Name, slugify(req.Name), req.Description, req.CoverModelID, id); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	c, err := a.getCollection(id)
 	if err != nil {
@@ -143,6 +187,10 @@ func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -164,17 +212,96 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request) {
-	res, err := a.db.Exec(`DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, chi.URLParam(r, "id"), chi.URLParam(r, "mid"))
+	id, modelID := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, id, modelID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE collections SET cover_model_id = NULL WHERE id = ? AND cover_model_id = ?`, id, modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	collection, err := a.getCollection(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("collection not found"))
+		return
+	}
+	var req struct {
+		ModelIDs []string `json:"modelIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.ModelIDs) != len(collection.ModelIDs) {
+		writeError(w, http.StatusBadRequest, errors.New("modelIds must contain every collection model exactly once"))
+		return
+	}
+	want := make(map[string]bool, len(collection.ModelIDs))
+	for _, modelID := range collection.ModelIDs {
+		want[modelID] = true
+	}
+	for _, modelID := range req.ModelIDs {
+		if !want[modelID] {
+			writeError(w, http.StatusBadRequest, errors.New("modelIds must contain every collection model exactly once"))
+			return
+		}
+		delete(want, modelID)
+	}
+	if len(want) != 0 {
+		writeError(w, http.StatusBadRequest, errors.New("modelIds must contain every collection model exactly once"))
+		return
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+	for order, modelID := range req.ModelIDs {
+		if _, err := tx.Exec(`UPDATE collection_models SET sort_order = ? WHERE collection_id = ? AND model_id = ?`, order, id, modelID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -193,13 +320,34 @@ func (a *App) getCollection(idOrSlug string) (Collection, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var id string
-		_ = rows.Scan(&id)
-		m, err := a.getModel(id)
-		if err == nil {
-			c.Models = append(c.Models, m)
+		if err := rows.Scan(&id); err != nil {
+			return c, err
 		}
+		c.ModelIDs = append(c.ModelIDs, id)
+		m, err := a.getModel(id)
+		if err != nil {
+			return c, err
+		}
+		c.Models = append(c.Models, m)
 	}
-	return c, nil
+	return c, rows.Err()
+}
+
+func (a *App) writeCollectionsSidecar() error {
+	collections, err := a.listCollections()
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(collections, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(a.cfg.DataDir, "collections.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
@@ -212,8 +360,15 @@ func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
 	var out []ShareLink
 	for rows.Next() {
 		var s ShareLink
-		_ = rows.Scan(&s.ID, &s.Token, &s.Scope, &s.TargetID, &s.Label, &s.ExpiresAt, &s.RevokedAt, &s.HitCount, &s.CreatedAt)
+		if err := rows.Scan(&s.ID, &s.Token, &s.Scope, &s.TargetID, &s.Label, &s.ExpiresAt, &s.RevokedAt, &s.HitCount, &s.CreatedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }

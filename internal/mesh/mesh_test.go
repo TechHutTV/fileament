@@ -1,11 +1,12 @@
 package mesh
 
 import (
-	"archive/zip"
 	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/qmuntal/go3mf"
 )
 
 func TestParseASCIISTL(t *testing.T) {
@@ -53,12 +54,19 @@ func TestParseOBJ(t *testing.T) {
 func TestParse3MF(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "part.3mf")
 	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, _ := zw.Create("3D/3dmodel.model")
-	_, _ = w.Write([]byte(`<model><resources><object id="1"><mesh><vertices>
-<vertex x="0" y="0" z="0"/><vertex x="5" y="0" z="0"/><vertex x="0" y="6" z="0"/>
-</vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources></model>`))
-	_ = zw.Close()
+	model := &go3mf.Model{
+		Resources: go3mf.Resources{Objects: []*go3mf.Object{
+			{ID: 1, Mesh: &go3mf.Mesh{Vertices: []go3mf.Point3D{{0, 0, 0}, {5, 0, 0}, {0, 6, 0}}, Triangles: []go3mf.Triangle{go3mf.NewTriangle(0, 1, 2)}}},
+			{ID: 2, Mesh: &go3mf.Mesh{Vertices: []go3mf.Point3D{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}, Triangles: []go3mf.Triangle{go3mf.NewTriangle(0, 1, 2)}}},
+		}},
+		Build: go3mf.Build{Items: []*go3mf.Item{
+			{ObjectID: 1, Transform: go3mf.Identity()},
+			{ObjectID: 2, Transform: go3mf.Identity().Translate(10, 0, 0)},
+		}},
+	}
+	if err := go3mf.NewEncoder(&buf).Encode(model); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -66,10 +74,10 @@ func TestParse3MF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Format != "3mf" || stats.TriangleCount != 1 || stats.BBoxX != 5 || stats.BBoxY != 6 {
+	if stats.Format != "3mf" || stats.TriangleCount != 2 || stats.BBoxX != 11 || stats.BBoxY != 6 {
 		t.Fatalf("unexpected stats %#v", stats)
 	}
-	if len(tris) != 1 {
+	if len(tris) != 2 || tris[1].A.X != 10 {
 		t.Fatalf("triangles = %d", len(tris))
 	}
 }

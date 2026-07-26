@@ -8,8 +8,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +52,37 @@ endsolid p`,
 	}
 	if files != 1 {
 		t.Fatalf("parsed files = %d", files)
+	}
+	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", id, "bundle.zip")); !os.IsNotExist(err) {
+		t.Fatalf("source archive should not be retained: %v", err)
+	}
+}
+
+func TestMultipartRequestCapIncludesHeadersAndOverhead(t *testing.T) {
+	app := newAuthedTestApp(t)
+	app.cfg.MaxUploadMB = 1
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="part.stl"`)
+	header.Set("Content-Type", "application/octet-stream")
+	header.Set("X-Fill", strings.Repeat("a", 3<<20))
+	part, err := mw.CreatePart(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte(validSTL()))
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/models", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	_, cleanup, err := app.streamSingleUpload(httptest.NewRecorder(), req)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "request body too large") {
+		t.Fatalf("expected whole-request size rejection, got %v", err)
 	}
 }
 

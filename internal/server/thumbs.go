@@ -50,7 +50,7 @@ func (a *App) mountThumbRoutes(r chi.Router) {
 	r.With(a.requireAuth).Get("/thumbs/{modelID}/{name}", a.handleThumb)
 }
 
-func (a *App) processNextThumbnail() error {
+func (a *App) processNextThumbnail() (err error) {
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -78,20 +78,25 @@ func (a *App) processNextThumbnail() error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	claimed := true
+	defer func() {
+		if claimed && err != nil {
+			_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
+		}
+	}()
 	var modelID, relPath string
 	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
 		return err
 	}
 	meshPath := filepath.Join(a.cfg.DataDir, "models", modelID, relPath)
-	if safe, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), relPath); err != nil {
-		_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
+	if safe, pathErr := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), relPath); pathErr != nil {
+		err = pathErr
 		return err
 	} else {
 		meshPath = safe
 	}
 	_, tris, err := mesh.ParseFile(meshPath)
 	if err != nil {
-		_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
 		return err
 	}
 	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".jpg"))
@@ -100,30 +105,38 @@ func (a *App) processNextThumbnail() error {
 		return err
 	}
 	if err := render.RenderJPEG(tris, thumbPath, 512); err != nil {
-		_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
-		return err
-	}
-	cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.jpg")
-	primary := "card.jpg"
-	var existing sql.NullString
-	_ = a.db.QueryRow(`SELECT primary_thumb FROM models WHERE id = ?`, modelID).Scan(&existing)
-	if existing.Valid && existing.String != "" {
-		primary = existing.String
-	} else if err := copyFile(cardPath, thumbPath); err != nil {
 		return err
 	}
 	if _, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE models SET primary_thumb = ? WHERE id = ? AND (primary_thumb IS NULL OR primary_thumb = '')`, primary, modelID); err != nil {
+	var primary, largestFileID string
+	if err := a.db.QueryRow(`SELECT COALESCE(primary_thumb, '') FROM models WHERE id = ?`, modelID).Scan(&primary); err != nil {
+		return err
+	}
+	if err := a.db.QueryRow(`SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
+		return err
+	}
+	if primary == "" && fileID == largestFileID {
+		cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.jpg")
+		if err := copyFile(cardPath, thumbPath); err != nil {
+			return err
+		}
+		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.jpg' WHERE id = ? AND (primary_thumb IS NULL OR primary_thumb = '')`, modelID); err != nil {
+			return err
+		}
+	}
+	m, err := a.getModel(modelID)
+	if err != nil {
+		return err
+	}
+	if err := a.writeSidecar(m); err != nil {
 		return err
 	}
 	if _, err := a.db.Exec(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ?`, jobID); err != nil {
 		return err
 	}
-	if m, err := a.getModel(modelID); err == nil {
-		_ = a.writeSidecar(m)
-	}
+	claimed = false
 	a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: thumbRel})
 	return nil
 }

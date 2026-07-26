@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"image"
 	"image/png"
@@ -136,6 +138,69 @@ func TestSecureCookieFromHTTPSBaseURL(t *testing.T) {
 	}
 }
 
+func TestForeignKeysAreEnabledOnEveryPooledConnection(t *testing.T) {
+	app := newAuthedTestApp(t)
+	ctx := context.Background()
+	first, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	for i, conn := range []*sql.Conn{first, second} {
+		var enabled int
+		if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+			t.Fatal(err)
+		}
+		if enabled != 1 {
+			t.Fatalf("connection %d foreign_keys=%d", i+1, enabled)
+		}
+	}
+}
+
+func TestLargestMeshBecomesDefaultCardRegardlessOfJobOrder(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	model := uploadSTLModel(t, app, cookie, "small.stl", "Meshes")
+	largeSTL := strings.ReplaceAll(validSTL(), "vertex 1 0 0", "vertex 10 0 0") + strings.Repeat("\n# padding", 100)
+	body, ctype := multipartFile(t, "large.stl", []byte(largeSTL))
+	req := httptest.NewRequest(http.MethodPost, "/api/models/"+model.ID+"/files", body)
+	req.Header.Set("Content-Type", ctype)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("append status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`UPDATE jobs SET created_at = CASE file_id WHEN ? THEN 1 ELSE 2 END WHERE file_id IN (?, ?)`, model.Files[0].ID, model.Files[0].ID, model.Files[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.processNextThumbnail(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.processNextThumbnail(); err != nil {
+		t.Fatal(err)
+	}
+	card, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", "card.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", model.Files[1].ID+".jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(card, large) {
+		t.Fatal("card thumbnail was not generated from the largest mesh")
+	}
+}
+
 func TestStartupRecoversSidecarsAndRunningJobs(t *testing.T) {
 	dir := t.TempDir()
 	app := newTestAppWithConfig(t, config.Config{DataDir: dir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32})
@@ -161,6 +226,61 @@ func TestStartupRecoversSidecarsAndRunningJobs(t *testing.T) {
 	_ = app2.db.QueryRow(`SELECT status FROM jobs LIMIT 1`).Scan(&status)
 	if files != 1 || status != "pending" {
 		t.Fatalf("recovery files=%d status=%q", files, status)
+	}
+}
+
+func TestStartupRebuildsCollectionsFromDurableSidecar(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{DataDir: dir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32}
+	app := newTestAppWithConfig(t, cfg)
+	cookie := loginCookie(t, app, "password-password")
+	model := uploadSTLModel(t, app, cookie, "member.stl", "Member")
+
+	req := jsonReq(http.MethodPost, "/api/collections", `{"name":"Durable"}`)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create collection status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var collection Collection
+	if err := json.Unmarshal(rec.Body.Bytes(), &collection); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPut, "/api/collections/"+collection.ID+"/models/"+model.ID, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("add member status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	req = jsonReq(http.MethodPatch, "/api/collections/"+collection.ID, `{"name":"Durable","coverModelId":"`+model.ID+`"}`)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set cover status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(dir, "fileament.db") + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+
+	app2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app2.Close()
+	rebuilt, err := app2.getCollection(collection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.CoverModelID != model.ID || len(rebuilt.ModelIDs) != 1 || rebuilt.ModelIDs[0] != model.ID {
+		t.Fatalf("collection was not rebuilt from sidecar: %#v", rebuilt)
 	}
 }
 

@@ -6,6 +6,8 @@ toolchain go1.23.12
 
 require (
 	github.com/go-chi/chi/v5 v5.2.3
+	github.com/oklog/ulid/v2 v2.1.1
+	github.com/qmuntal/go3mf v0.20.4
 	golang.org/x/crypto v0.39.0
 	modernc.org/sqlite v1.38.2
 )
@@ -15,6 +17,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/qmuntal/opc v0.7.10 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/sys v0.34.0 // indirect

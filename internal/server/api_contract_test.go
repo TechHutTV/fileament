@@ -92,6 +92,87 @@ func TestExpiredShareCreateIsRejected(t *testing.T) {
 	}
 }
 
+func TestCollectionsExposeMembershipOrderingAndCover(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	first := uploadSTLModel(t, app, cookie, "first.stl", "First")
+	second := uploadSTLModel(t, app, cookie, "second.stl", "Second")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/collections", strings.NewReader(`{"name":"Ordered"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create collection status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var collection Collection
+	if err := json.Unmarshal(rec.Body.Bytes(), &collection); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, modelID := range []string{first.ID, second.ID} {
+		req = httptest.NewRequest(http.MethodPut, "/api/collections/"+collection.ID+"/models/"+modelID, nil)
+		req.AddCookie(cookie)
+		rec = httptest.NewRecorder()
+		app.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("add model status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/collections", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	var collections []Collection
+	if err := json.Unmarshal(rec.Body.Bytes(), &collections); err != nil {
+		t.Fatal(err)
+	}
+	if len(collections) != 1 || len(collections[0].ModelIDs) != 2 {
+		t.Fatalf("collection membership missing from list: %#v", collections)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/collections/"+collection.ID+"/order", strings.NewReader(`{"modelIds":["`+second.ID+`","`+first.ID+`"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("reorder status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/collections/"+collection.ID, strings.NewReader(`{"name":"Ordered","coverModelId":"`+second.ID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cover update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &collection); err != nil {
+		t.Fatal(err)
+	}
+	if collection.CoverModelID != second.ID || len(collection.Models) != 2 || collection.Models[0].ID != second.ID {
+		t.Fatalf("unexpected ordered collection: %#v", collection)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/collections/"+collection.ID+"/models/"+second.ID, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("remove cover model status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	collection, err := app.getCollection(collection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if collection.CoverModelID != "" {
+		t.Fatalf("cover was not cleared when its model was removed: %#v", collection)
+	}
+}
+
 func strconvInt(n int64) string {
 	return strconv.FormatInt(n, 10)
 }

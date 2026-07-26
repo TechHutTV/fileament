@@ -11,11 +11,11 @@ export default function ModelViewer({ file, url }: { file: ModelFile; url: strin
     <Canvas camera={{ position: [4, 4, 4], fov: 35 }}>
       <color attach="background" args={['#f7f7f4']} />
       <Suspense fallback={null}>
-        <Stage adjustCamera={false} intensity={0.8}>
-          <Bounds fit clip observe margin={1.2}>
+        <Bounds fit clip observe margin={1.2}>
+          <Stage adjustCamera={false} intensity={0.8}>
             <Loaded file={file} url={url} />
-          </Bounds>
-        </Stage>
+          </Stage>
+        </Bounds>
       </Suspense>
       <OrbitControls makeDefault />
     </Canvas>

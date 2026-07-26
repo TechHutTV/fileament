@@ -8,7 +8,7 @@ Fileament is a self-hosted catalog for a personal 3D printing model library. It 
 - Upload STL, OBJ, 3MF, or ZIP bundles from the web UI.
 - Streamed multipart upload ingestion into `/data/tmp`; no host `/tmp` staging or multipart memory buffering.
 - Secure ZIP extraction with junk-file filtering, path traversal rejection, compressed request caps, and uncompressed ZIP caps.
-- SQLite catalog with FTS search, tags, cursor pagination, collections, and durable `model.json` sidecars.
+- SQLite catalog with FTS search, tags, cursor pagination, collections, and durable model and collection sidecars.
 - Background thumbnail jobs with a software JPEG rasterizer and SSE thumbnail completion events.
 - Embedded React/Vite/TypeScript UI with dark mode, lazy thumbnail loading, detail views, downloads, and a Three.js viewer with a 50 MB auto-load gate.
 - Owner assets under `/files`, `/mesh`, `/thumbs`, and `/images` require authentication.
@@ -74,6 +74,7 @@ PATCH  /api/collections/{id}
 DELETE /api/collections/{id}
 PUT    /api/collections/{id}/models/{mid}
 DELETE /api/collections/{id}/models/{mid}
+PUT    /api/collections/{id}/order
 
 GET    /api/shares
 POST   /api/shares
@@ -131,6 +132,7 @@ npm run build
 ```text
 /data/
   fileament.db
+  collections.json
   tmp/
   models/
     <model-id>/
@@ -140,4 +142,4 @@ npm run build
       thumbs/
 ```
 
-SQLite is the query index. `model.json` is written beside each model on metadata changes so the durable catalog record lives with the uploaded files.
+SQLite is the query index. `model.json` is written beside each model on metadata changes, while `collections.json` preserves collection metadata, membership, covers, and ordering. Fileament rebuilds both records into a fresh database at startup if the SQLite index is lost.

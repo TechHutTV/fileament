@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,70 @@ func TestCatalogListSearchDetailPatchAndAssets(t *testing.T) {
 	app.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
 		t.Fatalf("mesh status=%d len=%d", rec.Code, rec.Body.Len())
+	}
+}
+
+func TestCatalogPaginationUsesTheSelectedSortKey(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	models := []Model{
+		uploadSTLModel(t, app, cookie, "zulu.stl", "Zulu"),
+		uploadSTLModel(t, app, cookie, "alpha.stl", "Alpha"),
+		uploadSTLModel(t, app, cookie, "mike.stl", "Mike"),
+	}
+	values := []struct {
+		title                  string
+		created, updated, size int64
+	}{{"Zulu", 100, 300, 100}, {"Alpha", 200, 100, 300}, {"Mike", 300, 200, 200}}
+	for i, model := range models {
+		v := values[i]
+		if _, err := app.db.Exec(`UPDATE models SET title = ?, created_at = ?, updated_at = ?, total_bytes = ? WHERE id = ?`, v.title, v.created, v.updated, v.size, model.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := map[string][]string{
+		"title":   {"Alpha", "Mike", "Zulu"},
+		"updated": {"Zulu", "Mike", "Alpha"},
+		"size":    {"Alpha", "Mike", "Zulu"},
+	}
+	for sortKey, want := range cases {
+		t.Run(sortKey, func(t *testing.T) {
+			cursor := ""
+			var got []string
+			for {
+				path := "/api/models?limit=1&sort=" + sortKey
+				if cursor != "" {
+					path += "&cursor=" + url.QueryEscape(cursor)
+				}
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.AddCookie(cookie)
+				rec := httptest.NewRecorder()
+				app.Router().ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+				}
+				var page struct {
+					Items      []Model `json:"items"`
+					NextCursor string  `json:"nextCursor"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range page.Items {
+					got = append(got, item.Title)
+				}
+				if page.NextCursor == "" {
+					break
+				}
+				cursor = page.NextCursor
+				if len(got) > len(want) {
+					t.Fatal("pagination did not terminate")
+				}
+			}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("titles=%v want=%v", got, want)
+			}
+		})
 	}
 }
 

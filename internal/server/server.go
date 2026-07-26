@@ -33,11 +33,12 @@ func New(cfg config.Config) (*App, error) {
 	if err := storage.EnsureLayout(cfg.DataDir); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "fileament.db"))
+	dbPath := filepath.ToSlash(filepath.Join(cfg.DataDir, "fileament.db"))
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -51,6 +52,10 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 	if err := app.rebuildFromSidecars(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := app.rebuildCollectionsFromSidecar(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

@@ -91,6 +91,9 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
 	collection := strings.TrimSpace(r.URL.Query().Get("collection"))
 	sortKey := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if sortKey == "" {
+		sortKey = "created"
+	}
 	args := []any{}
 	where := []string{"1=1"}
 	join := ""
@@ -114,14 +117,6 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		where = append(where, "(c.id = ? OR c.slug = ?)")
 		args = append(args, collection, collection)
 	}
-	if cursor != "" {
-		created, id := decodeCursor(cursor)
-		if created > 0 {
-			where = append(where, "(models.created_at < ? OR (models.created_at = ? AND models.id < ?))")
-			args = append(args, created, created, id)
-		}
-	}
-	args = append(args, limit+1)
 	order := "models.created_at DESC, models.id DESC"
 	switch sortKey {
 	case "updated":
@@ -130,11 +125,48 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		order = "models.title COLLATE NOCASE ASC, models.id ASC"
 	case "size":
 		order = "models.total_bytes DESC, models.id DESC"
-	case "", "created":
+	case "created":
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("unsupported sort"))
 		return
 	}
+	if cursor != "" {
+		decoded, err := decodeCursor(cursor)
+		if err != nil || decoded.Sort != sortKey {
+			writeError(w, http.StatusBadRequest, errors.New("invalid cursor"))
+			return
+		}
+		switch sortKey {
+		case "created":
+			value, err := strconv.ParseInt(decoded.Value, 10, 64)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, errors.New("invalid cursor"))
+				return
+			}
+			where = append(where, "(models.created_at < ? OR (models.created_at = ? AND models.id < ?))")
+			args = append(args, value, value, decoded.ID)
+		case "updated":
+			value, err := strconv.ParseInt(decoded.Value, 10, 64)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, errors.New("invalid cursor"))
+				return
+			}
+			where = append(where, "(models.updated_at < ? OR (models.updated_at = ? AND models.id < ?))")
+			args = append(args, value, value, decoded.ID)
+		case "size":
+			value, err := strconv.ParseInt(decoded.Value, 10, 64)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, errors.New("invalid cursor"))
+				return
+			}
+			where = append(where, "(models.total_bytes < ? OR (models.total_bytes = ? AND models.id < ?))")
+			args = append(args, value, value, decoded.ID)
+		case "title":
+			where = append(where, "(models.title COLLATE NOCASE > ? OR (models.title COLLATE NOCASE = ? AND models.id > ?))")
+			args = append(args, decoded.Value, decoded.Value, decoded.ID)
+		}
+	}
+	args = append(args, limit+1)
 	rows, err := a.db.Query(`SELECT DISTINCT models.id FROM models`+join+` WHERE `+strings.Join(where, " AND ")+` ORDER BY `+order+` LIMIT ?`, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -154,7 +186,7 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 	if len(ids) > limit {
 		ids = ids[:limit]
 		last, _ := a.getModel(ids[len(ids)-1])
-		next = encodeCursor(last.CreatedAt, last.ID)
+		next = encodeCursor(sortKey, last)
 	}
 	items := make([]Model, 0, len(ids))
 	for _, id := range ids {
@@ -193,7 +225,7 @@ type stagedUpload struct {
 
 func (a *App) streamSingleUpload(w http.ResponseWriter, r *http.Request) (stagedUpload, func(), error) {
 	max := a.cfg.MaxUploadMB << 20
-	r.Body = http.MaxBytesReader(w, r.Body, max+1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
 	mr, err := r.MultipartReader()
 	if err != nil {
 		return stagedUpload{}, nil, errors.Join(errBadUpload, err)
@@ -283,6 +315,8 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	previous := m
+	previous.Tags = append([]string(nil), m.Tags...)
 	var req patchModelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -311,8 +345,17 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m, _ = a.getModel(id)
-	_ = a.writeSidecar(m)
+	m, err = a.getModel(id)
+	if err != nil {
+		_ = a.updateModel(previous)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.writeSidecar(m); err != nil {
+		_ = a.updateModel(previous)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, m)
 }
 
@@ -323,6 +366,10 @@ func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := a.db.Exec(`DELETE FROM models WHERE id = ?`, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.writeCollectionsSidecar(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -552,8 +599,15 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m, _ := a.getModel(id)
-	_ = a.writeSidecar(m)
+	m, err := a.getModel(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.writeSidecar(m); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, m)
 }
 
@@ -596,6 +650,9 @@ func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
 	var err error
 	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
 		files, images, description, err = a.extractBundle(stage, upload.Path, id)
+		if err == nil {
+			err = os.Remove(upload.Path)
+		}
 	} else {
 		files, images, err = a.routeOneFile(stage, upload.Path, filepath.Base(upload.Name), id)
 	}
@@ -959,21 +1016,39 @@ func parseLimit(raw string, fallback int) int {
 	return n
 }
 
-func encodeCursor(created int64, id string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(created, 10) + ":" + id))
+type listCursor struct {
+	Sort  string `json:"sort"`
+	Value string `json:"value"`
+	ID    string `json:"id"`
 }
 
-func decodeCursor(raw string) (int64, string) {
+func encodeCursor(sortKey string, model Model) string {
+	value := model.Title
+	switch sortKey {
+	case "created":
+		value = strconv.FormatInt(model.CreatedAt, 10)
+	case "updated":
+		value = strconv.FormatInt(model.UpdatedAt, 10)
+	case "size":
+		value = strconv.FormatInt(model.TotalBytes, 10)
+	}
+	b, _ := json.Marshal(listCursor{Sort: sortKey, Value: value, ID: model.ID})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeCursor(raw string) (listCursor, error) {
 	b, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return 0, ""
+		return listCursor{}, err
 	}
-	parts := strings.SplitN(string(b), ":", 2)
-	if len(parts) != 2 {
-		return 0, ""
+	var cursor listCursor
+	if err := json.Unmarshal(b, &cursor); err != nil {
+		return listCursor{}, err
 	}
-	n, _ := strconv.ParseInt(parts[0], 10, 64)
-	return n, parts[1]
+	if cursor.Sort == "" || cursor.ID == "" {
+		return listCursor{}, errors.New("invalid cursor")
+	}
+	return cursor, nil
 }
 
 func ftsQuery(q string) string {

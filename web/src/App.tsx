@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, Download, Link2, Moon, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
+const NAVIGATION_EVENT = 'fileament:navigate';
 const client = new QueryClient();
 
 export type ModelFile = {
@@ -36,7 +38,7 @@ export type Model = {
 };
 type Page = { items: Model[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
-type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; models?: Model[] };
+type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
 
 export function Root() {
@@ -44,18 +46,23 @@ export function Root() {
 }
 
 export function App() {
-  const path = window.location.pathname;
+  const [path, setPath] = useState(window.location.pathname);
+  useEffect(() => {
+    const update = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', update);
+    window.addEventListener(NAVIGATION_EVENT, update);
+    return () => { window.removeEventListener('popstate', update); window.removeEventListener(NAVIGATION_EVENT, update); };
+  }, []);
   if (path.startsWith('/s/')) return <PublicPage token={path.split('/')[2]} />;
-  return <OwnerApp />;
+  return <OwnerApp path={path} />;
 }
 
-function OwnerApp() {
+function OwnerApp({ path }: { path: string }) {
   const [dark, setDark] = useState(localStorage.getItem('fileament-theme') === 'dark');
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     localStorage.setItem('fileament-theme', dark ? 'dark' : 'light');
   }, [dark]);
-  const path = window.location.pathname;
   const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   if (me.isLoading) return <Shell><Empty text="Loading" /></Shell>;
   if (me.data?.setupRequired) return <AuthScreen mode="setup" />;
@@ -91,7 +98,7 @@ function AuthScreen({ mode }: { mode: 'setup' | 'login' }) {
     <main className="auth">
       <form onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}>
         <h1>{mode === 'setup' ? 'Set owner password' : 'Owner login'}</h1>
-        <label>Password<input type="password" minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus /></label>
+        <label>Password<input type="password" minLength={mode === 'setup' ? 12 : undefined} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus /></label>
         <button type="submit">{mode === 'setup' ? 'Create owner' : 'Log in'}</button>
         {mutation.isError && <p className="error">Authentication failed</p>}
       </form>
@@ -127,7 +134,6 @@ function Catalog() {
     if (typeof EventSource === 'undefined') return undefined;
     const es = new EventSource('/api/events');
     es.addEventListener('thumbnail', () => qc.invalidateQueries({ queryKey: ['models'] }));
-    es.onerror = () => es.close();
     return () => es.close();
   }, [qc]);
   return (
@@ -170,7 +176,7 @@ function Detail({ id }: { id: string }) {
   const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
   const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
-  const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => { window.location.href = '/'; } });
+  const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => navigate('/') });
   const deleteFile = useMutation({ mutationFn: (fid: string) => api(`/api/models/${id}/files/${fid}`, { method: 'DELETE' }), onSuccess: invalidate });
   const deleteImage = useMutation({ mutationFn: (imageID: string) => api(`/api/models/${id}/images/${imageID}`, { method: 'DELETE' }), onSuccess: invalidate });
   const setThumb = useMutation({ mutationFn: (fileId: string) => api(`/api/models/${id}/thumb`, { method: 'PUT', body: JSON.stringify({ fileId }) }), onSuccess: invalidate });
@@ -252,11 +258,26 @@ function CollectionDetail({ slug }: { slug: string }) {
   const qc = useQueryClient();
   const { data } = useQuery<Collection>({ queryKey: ['collection', slug], queryFn: () => api(`/api/collections/${slug}`) });
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
-  const patch = useMutation({ mutationFn: (body: Partial<Collection>) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['collection', slug] }) });
-  const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => { window.location.href = '/collections'; } });
+  const invalidate = () => { qc.invalidateQueries({ queryKey: ['collection', slug] }); qc.invalidateQueries({ queryKey: ['collections'] }); };
+  const patch = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: (updated) => { qc.setQueryData(['collection', slug], updated); qc.invalidateQueries({ queryKey: ['collections'] }); if (updated.slug !== slug) navigate(`/collections/${updated.slug}`, true); } });
+  const reorder = useMutation({ mutationFn: (modelIds: string[]) => api(`/api/collections/${data?.id}/order`, { method: 'PUT', body: JSON.stringify({ modelIds }) }), onSuccess: invalidate });
+  const removeMember = useMutation({ mutationFn: (modelID: string) => api(`/api/collections/${data?.id}/models/${modelID}`, { method: 'DELETE' }), onSuccess: invalidate });
+  const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => navigate('/collections') });
   const share = useMutation({ mutationFn: (body: { label: string; expiresAt: number }) => api('/api/shares', { method: 'POST', body: JSON.stringify({ scope: 'collection', targetId: data?.id, ...body }) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   if (!data) return <section className="content"><Empty text="Loading collection" /></section>;
-  return <section className="content"><CollectionForm collection={data} onSave={(body) => patch.mutate(body)} /><div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => remove.mutate()}><Trash2 size={16} />Delete collection</button></div>{shares.data?.filter((s) => s.scope === 'collection' && s.targetId === data.id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}<div className="grid">{data.models?.map((model) => <ModelCard model={model} key={model.id} />)}</div></section>;
+  const move = (index: number, delta: number) => {
+    const modelIds = [...(data.modelIds ?? data.models?.map((model) => model.id) ?? [])];
+    const target = index + delta;
+    if (target < 0 || target >= modelIds.length) return;
+    [modelIds[index], modelIds[target]] = [modelIds[target], modelIds[index]];
+    reorder.mutate(modelIds);
+  };
+  return <section className="content">
+    <CollectionForm collection={data} onSave={(body) => patch.mutate(body)} />
+    <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => remove.mutate()}><Trash2 size={16} />Delete collection</button></div>
+    {shares.data?.filter((s) => s.scope === 'collection' && s.targetId === data.id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}
+    <div className="collection-models">{data.models?.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === (data.models?.length ?? 0) - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => removeMember.mutate(model.id)}><Trash2 size={16} /></button></div></div>)}</div>
+  </section>;
 }
 
 function PublicPage({ token }: { token: string }) {
@@ -278,13 +299,15 @@ function PublicModel({ model, token }: { model: Model; token: string }) {
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {
   const qc = useQueryClient();
   const mutate = useMutation({ mutationFn: ({ collectionID, has }: { collectionID: string; has: boolean }) => api(`/api/collections/${collectionID}/models/${model.id}`, { method: has ? 'DELETE' : 'PUT' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['collections'] }) });
-  return <div className="checks">{collections.map((c) => { const has = c.models?.some((m) => m.id === model.id) ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => mutate.mutate({ collectionID: c.id, has })} />{c.name}</label>; })}</div>;
+  return <div className="checks">{collections.map((c) => { const has = c.modelIds?.includes(model.id) ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => mutate.mutate({ collectionID: c.id, has })} />{c.name}</label>; })}</div>;
 }
 
 function CollectionForm({ collection, onSave }: { collection?: Collection; onSave: (body: Partial<Collection>) => void }) {
   const [name, setName] = useState(collection?.name ?? '');
   const [description, setDescription] = useState(collection?.description ?? '');
-  return <form className="stack inline-form" onSubmit={(e) => { e.preventDefault(); onSave({ name, description }); }}><label>Name<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>Description<input value={description} onChange={(e) => setDescription(e.target.value)} /></label><button type="submit"><Plus size={16} />{collection ? 'Save collection' : 'Create collection'}</button></form>;
+  const [coverModelId, setCoverModelId] = useState(collection?.coverModelId ?? '');
+  useEffect(() => { setName(collection?.name ?? ''); setDescription(collection?.description ?? ''); setCoverModelId(collection?.coverModelId ?? ''); }, [collection?.id, collection?.name, collection?.description, collection?.coverModelId]);
+  return <form className="stack inline-form" onSubmit={(e) => { e.preventDefault(); onSave({ name, description, coverModelId }); }}><label>{collection ? 'Collection name' : 'Name'}<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>{collection ? 'Collection description' : 'Description'}<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>{collection && <label>Cover model<select value={coverModelId} onChange={(e) => setCoverModelId(e.target.value)}><option value="">Automatic</option>{collection.models?.map((model) => <option key={model.id} value={model.id}>{model.title}</option>)}</select></label>}<button type="submit"><Plus size={16} />{collection ? 'Save collection' : 'Create collection'}</button></form>;
 }
 
 function ShareForm({ onCreate }: { onCreate: (body: { label: string; expiresAt: number }) => void }) {
@@ -317,7 +340,7 @@ function LazyImage({ src, alt }: { src: string; alt: string }) {
 
 function Markdown({ text }: { text: string }) {
   if (!text) return null;
-  return <div className="markdown">{text.split(/\n{2,}/).map((block, i) => <p key={i}>{block.split('\n').map((line, j) => <span key={j}>{line}{j < block.split('\n').length - 1 && <br />}</span>)}</p>)}</div>;
+  return <div className="markdown"><ReactMarkdown>{text}</ReactMarkdown></div>;
 }
 
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
@@ -340,6 +363,12 @@ async function api(path: string, init: RequestInit = {}) {
   if (!res.ok) throw new Error(await res.text());
   if (res.status === 204) return null;
   return res.json();
+}
+
+function navigate(path: string, replace = false) {
+  if (replace) window.history.replaceState({}, '', path);
+  else window.history.pushState({}, '', path);
+  window.dispatchEvent(new Event(NAVIGATION_EVENT));
 }
 
 function dims(f: ModelFile) {

@@ -1,18 +1,18 @@
 package mesh
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"encoding/xml"
 	"errors"
-	"io"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/qmuntal/go3mf"
 )
 
 const maxParserBytes int64 = 512 << 20
@@ -206,94 +206,96 @@ func parseOBJ(path string) ([]Triangle, error) {
 }
 
 func parse3MF(path string) ([]Triangle, error) {
-	zr, err := zip.OpenReader(path)
+	r, err := go3mf.OpenReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
-	for _, f := range zr.File {
-		if strings.HasSuffix(strings.ToLower(f.Name), ".model") {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			tris, err := parse3MFModel(rc)
-			_ = rc.Close()
-			return tris, err
-		}
+	defer r.Close()
+	model := new(go3mf.Model)
+	if err := r.Decode(model); err != nil {
+		return nil, err
 	}
-	return nil, errors.New("3mf model payload missing")
-}
-
-func parse3MFModel(r io.Reader) ([]Triangle, error) {
-	dec := xml.NewDecoder(r)
-	var verts []Vec3
+	scale := unitScale(model.Units)
 	var tris []Triangle
-	for {
-		tok, err := dec.Token()
-		if errors.Is(err, io.EOF) {
-			return tris, nil
+	active := map[string]bool{}
+	var appendObject func(string, uint32, go3mf.Matrix) error
+	appendObject = func(objectPath string, objectID uint32, transform go3mf.Matrix) error {
+		key := fmt.Sprintf("%s#%d", objectPath, objectID)
+		if active[key] {
+			return errors.New("3mf component cycle")
 		}
-		if err != nil {
-			return nil, err
-		}
-		el, ok := tok.(xml.StartElement)
+		active[key] = true
+		defer delete(active, key)
+		object, ok := model.FindObject(objectPath, objectID)
 		if !ok {
-			continue
+			return fmt.Errorf("3mf object %d not found", objectID)
 		}
-		switch el.Name.Local {
-		case "vertex":
-			var v Vec3
-			for _, a := range el.Attr {
-				switch a.Name.Local {
-				case "x":
-					var err error
-					v.X, err = strconv.ParseFloat(a.Value, 64)
-					if err != nil {
-						return nil, err
-					}
-				case "y":
-					var err error
-					v.Y, err = strconv.ParseFloat(a.Value, 64)
-					if err != nil {
-						return nil, err
-					}
-				case "z":
-					var err error
-					v.Z, err = strconv.ParseFloat(a.Value, 64)
-					if err != nil {
-						return nil, err
-					}
+		transform = matrixOrIdentity(transform)
+		if object.Mesh != nil {
+			for _, triangle := range object.Mesh.Triangles {
+				i1, i2, i3 := triangle.Indices()
+				if i1 >= uint32(len(object.Mesh.Vertices)) || i2 >= uint32(len(object.Mesh.Vertices)) || i3 >= uint32(len(object.Mesh.Vertices)) {
+					return errors.New("3mf triangle index out of range")
 				}
+				tris = append(tris, Triangle{
+					A: transformedPoint(object.Mesh.Vertices[i1], transform, scale),
+					B: transformedPoint(object.Mesh.Vertices[i2], transform, scale),
+					C: transformedPoint(object.Mesh.Vertices[i3], transform, scale),
+				})
 			}
-			verts = append(verts, v)
-		case "triangle":
-			var idx [3]int
-			seen := [3]bool{}
-			for _, a := range el.Attr {
-				n, err := strconv.Atoi(a.Value)
-				if err != nil {
+		}
+		for _, component := range object.Components {
+			componentTransform := matrixOrIdentity(component.Transform)
+			if err := appendObject(component.ObjectPath(objectPath), component.ObjectID, transform.Mul(componentTransform)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(model.Build.Items) == 0 {
+		for _, object := range model.Resources.Objects {
+			if object.Mesh != nil {
+				if err := appendObject("", object.ID, go3mf.Identity()); err != nil {
 					return nil, err
 				}
-				switch a.Name.Local {
-				case "v1":
-					idx[0] = n
-					seen[0] = true
-				case "v2":
-					idx[1] = n
-					seen[1] = true
-				case "v3":
-					idx[2] = n
-					seen[2] = true
-				}
 			}
-			for i, n := range idx {
-				if !seen[i] || n < 0 || n >= len(verts) {
-					return nil, errors.New("3mf triangle index out of range")
-				}
-			}
-			tris = append(tris, Triangle{A: verts[idx[0]], B: verts[idx[1]], C: verts[idx[2]]})
 		}
+		return tris, nil
+	}
+	for _, item := range model.Build.Items {
+		if err := appendObject(item.ObjectPath(), item.ObjectID, matrixOrIdentity(item.Transform)); err != nil {
+			return nil, err
+		}
+	}
+	return tris, nil
+}
+
+func matrixOrIdentity(matrix go3mf.Matrix) go3mf.Matrix {
+	if matrix == (go3mf.Matrix{}) {
+		return go3mf.Identity()
+	}
+	return matrix
+}
+
+func transformedPoint(point go3mf.Point3D, transform go3mf.Matrix, scale float64) Vec3 {
+	point = transform.Mul3D(point)
+	return Vec3{X: float64(point.X()) * scale, Y: float64(point.Y()) * scale, Z: float64(point.Z()) * scale}
+}
+
+func unitScale(units go3mf.Units) float64 {
+	switch units {
+	case go3mf.UnitMicrometer:
+		return 0.001
+	case go3mf.UnitCentimeter:
+		return 10
+	case go3mf.UnitInch:
+		return 25.4
+	case go3mf.UnitFoot:
+		return 304.8
+	case go3mf.UnitMeter:
+		return 1000
+	default:
+		return 1
 	}
 }
 
