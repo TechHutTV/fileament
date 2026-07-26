@@ -64,6 +64,7 @@ func (a *App) Router() http.Handler {
 	r.Post("/api/auth/setup", a.handleSetup)
 	r.Post("/api/auth/login", a.handleLogin)
 	r.Post("/api/auth/logout", a.handleLogout)
+	a.mountModelRoutes(r)
 	r.Get("/*", a.serveSPA)
 	return r
 }
