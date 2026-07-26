@@ -6,6 +6,7 @@ COPY web/ ./
 RUN npm run build
 
 FROM golang:1.23-alpine AS build
+ENV PATH="/usr/local/go/bin:${PATH}"
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

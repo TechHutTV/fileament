@@ -1,26 +1,48 @@
-name: CI
+name: ci
 
 on:
   push:
   pull_request:
 
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -c "go mod download && go test ./..."
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
+
+      - name: Go test
+        run: |
+          docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/")'
+
+      - name: Go vet
+        run: |
+          docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go vet $(go list ./... | grep -v "/node_modules/")'
+
+      - name: Frontend install
         working-directory: web
-      - run: npm run lint
+        run: npm ci
+
+      - name: Frontend lint
         working-directory: web
-      - run: npm run typecheck
+        run: npm run lint
+
+      - name: Frontend typecheck
         working-directory: web
-      - run: npm test
+        run: npm run typecheck
+
+      - name: Frontend tests
         working-directory: web
-      - run: docker build -t fileament:ci .
+        run: npm test
+
+      - name: Frontend build
+        working-directory: web
+        run: npm run build
+
+      - name: Docker build
+        run: docker build -t fileament:ci .

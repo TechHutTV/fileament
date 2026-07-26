@@ -1,7 +1,8 @@
 .git
+.github
 .hermes
 node_modules
 web/node_modules
+web/dist
 coverage
-dist
 tmp
