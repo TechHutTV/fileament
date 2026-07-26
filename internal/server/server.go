@@ -75,10 +75,17 @@ func (a *App) Router() http.Handler {
 	r.Post("/api/auth/setup", a.handleSetup)
 	r.Post("/api/auth/login", a.handleLogin)
 	r.Post("/api/auth/logout", a.handleLogout)
+	r.With(a.requireAuth).Get("/api/storage", a.handleStorageStats)
 	a.mountModelRoutes(r)
 	a.mountThumbRoutes(r)
 	r.Get("/*", a.serveSPA)
 	return r
+}
+
+func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
+	var total int64
+	_ = a.db.QueryRow(`SELECT COALESCE(SUM(total_bytes), 0) FROM models`).Scan(&total)
+	writeJSON(w, http.StatusOK, map[string]int64{"totalBytes": total})
 }
 
 func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,8 @@ package server
 import (
 	"archive/zip"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,7 +65,77 @@ type Image struct {
 var errBadUpload = errors.New("invalid upload")
 
 func (a *App) mountModelRoutes(r chi.Router) {
-	r.With(a.requireAuth).Post("/api/models", a.handleCreateModel)
+	r.Group(func(r chi.Router) {
+		r.Use(a.requireAuth)
+		r.Get("/api/models", a.handleListModels)
+		r.Post("/api/models", a.handleCreateModel)
+		r.Get("/api/models/{id}", a.handleGetModel)
+		r.Patch("/api/models/{id}", a.handlePatchModel)
+		r.Delete("/api/models/{id}", a.handleDeleteModel)
+		r.Get("/api/tags", a.handleTags)
+		r.Get("/files/{modelID}/{fileID}", a.handleDownload)
+		r.Get("/mesh/{modelID}/{fileID}", a.handleMesh)
+		r.Put("/api/models/{id}/thumb", a.handleSetThumb)
+	})
+}
+
+func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r.URL.Query().Get("limit"), 24)
+	cursor := r.URL.Query().Get("cursor")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
+	args := []any{}
+	where := []string{"1=1"}
+	join := ""
+	if q != "" {
+		join += " JOIN models_fts fts ON fts.rowid = models.rowid"
+		where = append(where, "models_fts MATCH ?")
+		args = append(args, ftsQuery(q))
+	}
+	if tag != "" {
+		join += " JOIN model_tags mt ON mt.model_id = models.id JOIN tags tg ON tg.id = mt.tag_id"
+		where = append(where, "tg.slug = ?")
+		args = append(args, tag)
+	}
+	if cursor != "" {
+		created, id := decodeCursor(cursor)
+		if created > 0 {
+			where = append(where, "(models.created_at < ? OR (models.created_at = ? AND models.id < ?))")
+			args = append(args, created, created, id)
+		}
+	}
+	args = append(args, limit+1)
+	rows, err := a.db.Query(`SELECT DISTINCT models.id FROM models`+join+` WHERE `+strings.Join(where, " AND ")+` ORDER BY models.created_at DESC, models.id DESC LIMIT ?`, args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		ids = append(ids, id)
+	}
+	next := ""
+	if len(ids) > limit {
+		ids = ids[:limit]
+		last, _ := a.getModel(ids[len(ids)-1])
+		next = encodeCursor(last.CreatedAt, last.ID)
+	}
+	items := make([]Model, 0, len(ids))
+	for _, id := range ids {
+		m, err := a.getModel(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		items = append(items, m)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": next})
 }
 
 func (a *App) handleCreateModel(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +158,147 @@ func (a *App) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, model)
+}
+
+func (a *App) handleGetModel(w http.ResponseWriter, r *http.Request) {
+	m, err := a.getModel(chi.URLParam(r, "id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+type patchModelRequest struct {
+	Title       *string  `json:"title"`
+	Description *string  `json:"description"`
+	SourceURL   *string  `json:"sourceUrl"`
+	License     *string  `json:"license"`
+	Author      *string  `json:"author"`
+	Tags        []string `json:"tags"`
+}
+
+func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	m, err := a.getModel(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var req patchModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Title != nil {
+		m.Title = strings.TrimSpace(*req.Title)
+	}
+	if req.Description != nil {
+		m.Description = *req.Description
+	}
+	if req.SourceURL != nil {
+		m.SourceURL = *req.SourceURL
+	}
+	if req.License != nil {
+		m.License = *req.License
+	}
+	if req.Author != nil {
+		m.Author = *req.Author
+	}
+	if req.Tags != nil {
+		m.Tags = normalizeTags(req.Tags)
+	}
+	m.UpdatedAt = time.Now().Unix()
+	if err := a.updateModel(m); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	m, _ = a.getModel(id)
+	_ = a.writeSidecar(m)
+	writeJSON(w, http.StatusOK, m)
+}
+
+func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := a.db.Exec(`DELETE FROM models WHERE id = ?`, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	_ = os.RemoveAll(filepath.Join(a.cfg.DataDir, "models", id))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleTags(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(`SELECT name, slug FROM tags ORDER BY name`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	var tags []map[string]string
+	for rows.Next() {
+		var name, slug string
+		_ = rows.Scan(&name, &slug)
+		tags = append(tags, map[string]string{"name": name, "slug": slug})
+	}
+	writeJSON(w, http.StatusOK, tags)
+}
+
+func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
+	a.serveModelFile(w, r, true)
+}
+
+func (a *App) handleMesh(w http.ResponseWriter, r *http.Request) {
+	a.serveModelFile(w, r, false)
+}
+
+func (a *App) serveModelFile(w http.ResponseWriter, r *http.Request, attachment bool) {
+	modelID, fileID := chi.URLParam(r, "modelID"), chi.URLParam(r, "fileID")
+	var filename, rel string
+	err := a.db.QueryRow(`SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if attachment {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+	}
+	http.ServeFile(w, r, filepath.Join(a.cfg.DataDir, "models", modelID, rel))
+}
+
+func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		FileID string `json:"fileId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var thumb sql.NullString
+	if err := a.db.QueryRow(`SELECT thumb_path FROM files WHERE id = ? AND model_id = ?`, req.FileID, id).Scan(&thumb); err != nil || !thumb.Valid {
+		writeError(w, http.StatusBadRequest, errors.New("thumbnail is not available"))
+		return
+	}
+	if err := copyFile(filepath.Join(a.cfg.DataDir, "models", id, "thumbs", "card.jpg"), filepath.Join(a.cfg.DataDir, "models", id, thumb.String)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.jpg', updated_at = ? WHERE id = ?`, time.Now().Unix(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	m, _ := a.getModel(id)
+	_ = a.writeSidecar(m)
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
@@ -122,6 +335,9 @@ func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
 	}
 	if len(files) == 0 {
 		return Model{}, errors.Join(errBadUpload, errors.New("bundle contains no supported mesh files"))
+	}
+	if strings.EqualFold(title, "bundle") && len(files) > 0 {
+		title = strings.TrimSuffix(files[0].Filename, filepath.Ext(files[0].Filename))
 	}
 	var total int64
 	for _, f := range files {
@@ -295,6 +511,151 @@ func (a *App) writeSidecar(model Model) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (a *App) getModel(id string) (Model, error) {
+	var m Model
+	err := a.db.QueryRow(`SELECT id,title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),COALESCE(primary_thumb,''),total_bytes,created_at,updated_at FROM models WHERE id = ?`, id).
+		Scan(&m.ID, &m.Title, &m.Description, &m.SourceURL, &m.License, &m.Author, &m.PrimaryThumb, &m.TotalBytes, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		return m, err
+	}
+	rows, err := a.db.Query(`SELECT id,filename,rel_path,format,size_bytes,sha256,COALESCE(triangle_count,0),COALESCE(bbox_x,0),COALESCE(bbox_y,0),COALESCE(bbox_z,0),COALESCE(thumb_path,''),sort_order FROM files WHERE model_id = ? ORDER BY sort_order, filename`, id)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f ModelFile
+		f.ModelID = id
+		if err := rows.Scan(&f.ID, &f.Filename, &f.RelPath, &f.Format, &f.SizeBytes, &f.SHA256, &f.TriangleCount, &f.BBoxX, &f.BBoxY, &f.BBoxZ, &f.ThumbPath, &f.SortOrder); err != nil {
+			return m, err
+		}
+		m.Files = append(m.Files, f)
+	}
+	imgRows, err := a.db.Query(`SELECT id,rel_path,sort_order FROM images WHERE model_id = ? ORDER BY sort_order`, id)
+	if err != nil {
+		return m, err
+	}
+	defer imgRows.Close()
+	for imgRows.Next() {
+		var img Image
+		img.ModelID = id
+		_ = imgRows.Scan(&img.ID, &img.RelPath, &img.SortOrder)
+		m.Images = append(m.Images, img)
+	}
+	tagRows, err := a.db.Query(`SELECT tags.name FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = ? ORDER BY tags.name`, id)
+	if err != nil {
+		return m, err
+	}
+	defer tagRows.Close()
+	for tagRows.Next() {
+		var tag string
+		_ = tagRows.Scan(&tag)
+		m.Tags = append(m.Tags, tag)
+	}
+	return m, nil
+}
+
+func (a *App) updateModel(m Model) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE models SET title=?, description=?, source_url=?, license=?, author=?, updated_at=? WHERE id=?`, m.Title, m.Description, emptyNull(m.SourceURL), emptyNull(m.License), emptyNull(m.Author), m.UpdatedAt, m.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM model_tags WHERE model_id = ?`, m.ID); err != nil {
+		return err
+	}
+	for _, tag := range m.Tags {
+		slug := slugify(tag)
+		tagID := "tag_" + slug
+		if _, err := tx.Exec(`INSERT INTO tags(id,name,slug) VALUES(?,?,?) ON CONFLICT(slug) DO UPDATE SET name=excluded.name`, tagID, tag, slug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO model_tags(model_id, tag_id) VALUES(?, (SELECT id FROM tags WHERE slug = ?))`, m.ID, slug); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO models_fts(rowid, title, description, tags) VALUES((SELECT rowid FROM models WHERE id = ?), ?, ?, ?)`, m.ID, m.Title, m.Description, strings.Join(m.Tags, " ")); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func parseLimit(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > 100 {
+		return fallback
+	}
+	return n
+}
+
+func encodeCursor(created int64, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(created, 10) + ":" + id))
+}
+
+func decodeCursor(raw string) (int64, string) {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return 0, ""
+	}
+	parts := strings.SplitN(string(b), ":", 2)
+	if len(parts) != 2 {
+		return 0, ""
+	}
+	n, _ := strconv.ParseInt(parts[0], 10, 64)
+	return n, parts[1]
+}
+
+func ftsQuery(q string) string {
+	parts := strings.Fields(q)
+	for i, p := range parts {
+		parts[i] = strings.Trim(p, `"'*`) + "*"
+	}
+	return strings.Join(parts, " ")
+}
+
+func normalizeTags(tags []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[slugify(tag)] {
+			continue
+		}
+		seen[slugify(tag)] = true
+		out = append(out, tag)
+	}
+	return out
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	dash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			dash = false
+		} else if !dash {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func emptyNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func copyCapped(dst string, src io.Reader, capBytes int64) error {
