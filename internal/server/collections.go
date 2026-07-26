@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brandon/fileament/internal/ids"
+	"github.com/TechHutTV/fileament/internal/ids"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -55,6 +55,7 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 	r.Get("/api/public/{token}/files/{fid}", a.handlePublicFile)
 	r.Get("/api/public/{token}/mesh/{fid}", a.handlePublicMesh)
 	r.Get("/api/public/{token}/thumbs/{name}", a.handlePublicThumb)
+	r.Get("/api/public/{token}/images/{imageID}", a.handlePublicImage)
 }
 
 func (a *App) handleListCollections(w http.ResponseWriter, r *http.Request) {
@@ -243,13 +244,13 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachmen
 		publicError(w, err)
 		return
 	}
+	w.Header().Set("X-Robots-Tag", "noindex")
 	fileID := chi.URLParam(r, "fid")
 	modelID, ok := a.publicFileAllowed(share, fileID)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("X-Robots-Tag", "noindex")
 	var filename, rel string
 	if err := a.db.QueryRow(`SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel); err != nil {
 		http.NotFound(w, r)
@@ -258,7 +259,12 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachmen
 	if attachment {
 		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
 	}
-	http.ServeFile(w, r, filepath.Join(a.cfg.DataDir, "models", modelID, rel))
+	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
 }
 
 func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +273,7 @@ func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
 		publicError(w, err)
 		return
 	}
+	w.Header().Set("X-Robots-Tag", "noindex")
 	modelID := share.TargetID
 	if share.Scope == "collection" {
 		modelID = r.URL.Query().Get("model")
@@ -275,8 +282,46 @@ func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !a.thumbAllowed(modelID, chi.URLParam(r, "name")) {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := containedName(filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs"), chi.URLParam(r, "name"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
+}
+
+func (a *App) handlePublicImage(w http.ResponseWriter, r *http.Request) {
+	share, err := a.resolveShare(chi.URLParam(r, "token"))
+	if err != nil {
+		publicError(w, err)
+		return
+	}
 	w.Header().Set("X-Robots-Tag", "noindex")
-	http.ServeFile(w, r, filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", filepath.Base(chi.URLParam(r, "name"))))
+	imageID := chi.URLParam(r, "imageID")
+	var modelID, rel string
+	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM images WHERE id = ?`, imageID).Scan(&modelID, &rel); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if share.Scope == "model" {
+		if modelID != share.TargetID {
+			http.NotFound(w, r)
+			return
+		}
+	} else if !a.collectionContains(share.TargetID, modelID) {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
 }
 
 var errShareGone = errors.New("share is expired or revoked")

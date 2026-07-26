@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/brandon/fileament/internal/mesh"
-	"github.com/brandon/fileament/internal/render"
+	"github.com/TechHutTV/fileament/internal/mesh"
+	"github.com/TechHutTV/fileament/internal/render"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -46,7 +47,7 @@ func (a *App) startWorkers() {
 
 func (a *App) mountThumbRoutes(r chi.Router) {
 	r.With(a.requireAuth).Get("/api/events", a.handleEvents)
-	r.Get("/thumbs/{modelID}/{name}", a.handleThumb)
+	r.With(a.requireAuth).Get("/thumbs/{modelID}/{name}", a.handleThumb)
 }
 
 func (a *App) processNextThumbnail() error {
@@ -64,9 +65,15 @@ func (a *App) processNextThumbnail() error {
 		_ = tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ?`, jobID); err != nil {
+	res, err := tx.Exec(`UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
+	if err != nil {
 		_ = tx.Rollback()
 		return err
+	}
+	changed, _ := res.RowsAffected()
+	if changed != 1 {
+		_ = tx.Rollback()
+		return nil
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -76,6 +83,12 @@ func (a *App) processNextThumbnail() error {
 		return err
 	}
 	meshPath := filepath.Join(a.cfg.DataDir, "models", modelID, relPath)
+	if safe, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), relPath); err != nil {
+		_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
+		return err
+	} else {
+		meshPath = safe
+	}
 	_, tris, err := mesh.ParseFile(meshPath)
 	if err != nil {
 		_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
@@ -108,16 +121,26 @@ func (a *App) processNextThumbnail() error {
 	if _, err := a.db.Exec(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ?`, jobID); err != nil {
 		return err
 	}
+	if m, err := a.getModel(modelID); err == nil {
+		_ = a.writeSidecar(m)
+	}
 	a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: thumbRel})
 	return nil
 }
 
 func copyFile(dst, src string) error {
-	data, err := os.ReadFile(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -168,9 +191,30 @@ func (a *App) publishEvent(evt ThumbnailEvent) {
 
 func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 	modelID := chi.URLParam(r, "modelID")
-	name := filepath.Base(chi.URLParam(r, "name"))
-	path := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", name)
+	name := chi.URLParam(r, "name")
+	if !a.thumbAllowed(modelID, name) {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := containedName(filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs"), name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	http.ServeFile(w, r, path)
+}
+
+func (a *App) thumbAllowed(modelID, name string) bool {
+	if name == "" || name != filepath.Base(name) {
+		return false
+	}
+	var n int
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM models WHERE id = ? AND primary_thumb = ?`, modelID, name).Scan(&n)
+	if n > 0 {
+		return true
+	}
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM files WHERE model_id = ? AND thumb_path = ?`, modelID, filepath.ToSlash(filepath.Join("thumbs", name))).Scan(&n)
+	return n > 0
 }
 
 var _ = sync.Mutex{}

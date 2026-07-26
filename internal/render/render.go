@@ -7,7 +7,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/brandon/fileament/internal/mesh"
+	"github.com/TechHutTV/fileament/internal/mesh"
 )
 
 type point struct {

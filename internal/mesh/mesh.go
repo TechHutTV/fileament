@@ -15,6 +15,8 @@ import (
 	"strings"
 )
 
+const maxParserBytes int64 = 512 << 20
+
 type Vec3 struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
@@ -36,19 +38,36 @@ type Stats struct {
 }
 
 func ParseFile(path string) (Stats, []Triangle, error) {
+	if st, err := os.Stat(path); err != nil {
+		return Stats{}, nil, err
+	} else if st.Size() <= 0 {
+		return Stats{}, nil, errors.New("mesh is empty")
+	} else if st.Size() > maxParserBytes {
+		return Stats{}, nil, errors.New("mesh exceeds parser size limit")
+	}
+	var format string
+	var tris []Triangle
+	var err error
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
 	case "stl":
-		tris, err := parseSTL(path)
-		return stats("stl", tris), tris, err
+		format = "stl"
+		tris, err = parseSTL(path)
 	case "obj":
-		tris, err := parseOBJ(path)
-		return stats("obj", tris), tris, err
+		format = "obj"
+		tris, err = parseOBJ(path)
 	case "3mf":
-		tris, err := parse3MF(path)
-		return stats("3mf", tris), tris, err
+		format = "3mf"
+		tris, err = parse3MF(path)
 	default:
 		return Stats{}, nil, errors.New("unsupported mesh format")
 	}
+	if err != nil {
+		return Stats{}, nil, err
+	}
+	if len(tris) == 0 {
+		return Stats{}, nil, errors.New("mesh contains no triangles")
+	}
+	return stats(format, tris), tris, nil
 }
 
 func stats(format string, tris []Triangle) Stats {
@@ -77,10 +96,14 @@ func parseSTL(path string) ([]Triangle, error) {
 	}
 	if len(data) >= 84 {
 		n := binary.LittleEndian.Uint32(data[80:84])
-		if int64(84)+int64(n)*50 == int64(len(data)) {
+		want := int64(84) + int64(n)*50
+		if want == int64(len(data)) {
 			tris := make([]Triangle, 0, n)
 			off := 84
 			for i := uint32(0); i < n; i++ {
+				if off+50 > len(data) {
+					return nil, errors.New("truncated binary stl")
+				}
 				off += 12
 				a := readVec(data[off:])
 				off += 12
@@ -91,11 +114,14 @@ func parseSTL(path string) ([]Triangle, error) {
 				tris = append(tris, Triangle{A: a, B: b, C: c})
 			}
 			return tris, nil
+		} else if n > 0 && want > int64(len(data)) && !bytes.HasPrefix(bytes.TrimSpace(data[:min(len(data), 80)]), []byte("solid")) {
+			return nil, errors.New("truncated binary stl")
 		}
 	}
 	var tris []Triangle
 	var verts []Vec3
 	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 4 && strings.EqualFold(fields[0], "vertex") {
@@ -110,7 +136,13 @@ func parseSTL(path string) ([]Triangle, error) {
 			}
 		}
 	}
-	return tris, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(verts) != 0 {
+		return nil, errors.New("incomplete ascii stl facet")
+	}
+	return tris, nil
 }
 
 func readVec(b []byte) Vec3 {
@@ -130,6 +162,7 @@ func parseOBJ(path string) ([]Triangle, error) {
 	var verts []Vec3
 	var tris []Triangle
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 0 {
@@ -158,6 +191,9 @@ func parseOBJ(path string) ([]Triangle, error) {
 				}
 				if n < 0 {
 					n = len(verts) + 1 + n
+				}
+				if n <= 0 || n > len(verts) {
+					return nil, errors.New("obj face index out of range")
 				}
 				idx = append(idx, n-1)
 			}
@@ -211,25 +247,49 @@ func parse3MFModel(r io.Reader) ([]Triangle, error) {
 			for _, a := range el.Attr {
 				switch a.Name.Local {
 				case "x":
-					v.X, _ = strconv.ParseFloat(a.Value, 64)
+					var err error
+					v.X, err = strconv.ParseFloat(a.Value, 64)
+					if err != nil {
+						return nil, err
+					}
 				case "y":
-					v.Y, _ = strconv.ParseFloat(a.Value, 64)
+					var err error
+					v.Y, err = strconv.ParseFloat(a.Value, 64)
+					if err != nil {
+						return nil, err
+					}
 				case "z":
-					v.Z, _ = strconv.ParseFloat(a.Value, 64)
+					var err error
+					v.Z, err = strconv.ParseFloat(a.Value, 64)
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 			verts = append(verts, v)
 		case "triangle":
 			var idx [3]int
+			seen := [3]bool{}
 			for _, a := range el.Attr {
-				n, _ := strconv.Atoi(a.Value)
+				n, err := strconv.Atoi(a.Value)
+				if err != nil {
+					return nil, err
+				}
 				switch a.Name.Local {
 				case "v1":
 					idx[0] = n
+					seen[0] = true
 				case "v2":
 					idx[1] = n
+					seen[1] = true
 				case "v3":
 					idx[2] = n
+					seen[2] = true
+				}
+			}
+			for i, n := range idx {
+				if !seen[i] || n < 0 || n >= len(verts) {
+					return nil, errors.New("3mf triangle index out of range")
 				}
 			}
 			tris = append(tris, Triangle{A: verts[idx[0]], B: verts[idx[1]], C: verts[idx[2]]})

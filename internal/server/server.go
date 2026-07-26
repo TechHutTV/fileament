@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/brandon/fileament/internal/config"
-	"github.com/brandon/fileament/internal/storage"
+	"github.com/TechHutTV/fileament/internal/config"
+	"github.com/TechHutTV/fileament/internal/storage"
 	"github.com/go-chi/chi/v5"
 	_ "modernc.org/sqlite"
 )
@@ -47,6 +47,14 @@ func New(cfg config.Config) (*App, error) {
 	}
 	app := &App{cfg: cfg, db: db, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}}
 	if err := app.seedOwnerPassword(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := app.rebuildFromSidecars(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := app.recoverThumbnailJobs(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -101,9 +109,15 @@ func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/s/") {
+			w.Header().Set("X-Robots-Tag", "noindex")
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/s/") {
+		w.Header().Set("X-Robots-Tag", "noindex")
 	}
 	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 }

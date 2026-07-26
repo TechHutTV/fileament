@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brandon/fileament/internal/ids"
-	"github.com/brandon/fileament/internal/mesh"
+	"github.com/TechHutTV/fileament/internal/ids"
+	"github.com/TechHutTV/fileament/internal/mesh"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -72,9 +72,14 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Get("/api/models/{id}", a.handleGetModel)
 		r.Patch("/api/models/{id}", a.handlePatchModel)
 		r.Delete("/api/models/{id}", a.handleDeleteModel)
+		r.Post("/api/models/{id}/files", a.handleAddModelFiles)
+		r.Delete("/api/models/{id}/files/{fid}", a.handleDeleteModelFile)
+		r.Post("/api/models/{id}/images", a.handleAddModelImages)
+		r.Delete("/api/models/{id}/images/{imageID}", a.handleDeleteModelImage)
 		r.Get("/api/tags", a.handleTags)
 		r.Get("/files/{modelID}/{fileID}", a.handleDownload)
 		r.Get("/mesh/{modelID}/{fileID}", a.handleMesh)
+		r.Get("/images/{modelID}/{imageID}", a.handleOwnerImage)
 		r.Put("/api/models/{id}/thumb", a.handleSetThumb)
 	})
 }
@@ -139,25 +144,89 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleCreateModel(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
+	upload, cleanup, err := a.streamSingleUpload(w, r)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	fhs := r.MultipartForm.File["file"]
-	if len(fhs) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("file is required"))
-		return
-	}
-	model, err := a.ingestUpload(fhs[0])
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, errBadUpload) {
-			status = http.StatusBadRequest
-		}
-		writeError(w, status, err)
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	model, err := a.ingestStagedUpload(upload)
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, model)
+}
+
+type stagedUpload struct {
+	Path     string
+	Name     string
+	StageDir string
+}
+
+func (a *App) streamSingleUpload(w http.ResponseWriter, r *http.Request) (stagedUpload, func(), error) {
+	max := a.cfg.MaxUploadMB << 20
+	r.Body = http.MaxBytesReader(w, r.Body, max+1<<20)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return stagedUpload{}, nil, errors.Join(errBadUpload, err)
+	}
+	stage := filepath.Join(a.cfg.DataDir, "tmp", ids.New())
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return stagedUpload{}, nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(stage) }
+	var upload stagedUpload
+	seenFile := false
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			cleanup()
+			return stagedUpload{}, nil, errors.Join(errBadUpload, err)
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			cleanup()
+			return stagedUpload{}, nil, errors.Join(errBadUpload, errors.New("unexpected multipart part"))
+		}
+		if seenFile {
+			_ = part.Close()
+			cleanup()
+			return stagedUpload{}, nil, errors.Join(errBadUpload, errors.New("only one file part is allowed"))
+		}
+		seenFile = true
+		name := filepath.Base(part.FileName())
+		dst, err := containedName(stage, name)
+		if err != nil {
+			_ = part.Close()
+			cleanup()
+			return stagedUpload{}, nil, errors.Join(errBadUpload, err)
+		}
+		if err := copyCapped(dst, part, max); err != nil {
+			_ = part.Close()
+			cleanup()
+			return stagedUpload{}, nil, errors.Join(errBadUpload, err)
+		}
+		_ = part.Close()
+		upload = stagedUpload{Path: dst, Name: name, StageDir: stage}
+	}
+	if !seenFile {
+		cleanup()
+		return stagedUpload{}, nil, errors.Join(errBadUpload, errors.New("file is required"))
+	}
+	return upload, cleanup, nil
+}
+
+func uploadStatus(err error) int {
+	if errors.Is(err, errBadUpload) || errors.Is(err, errInvalidPath) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 func (a *App) handleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -224,11 +293,152 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, err := a.getModel(id); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
 	if _, err := a.db.Exec(`DELETE FROM models WHERE id = ?`, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	_ = os.RemoveAll(filepath.Join(a.cfg.DataDir, "models", id))
+	root, err := containedName(filepath.Join(a.cfg.DataDir, "models"), id)
+	if err == nil {
+		_ = os.RemoveAll(root)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleAddModelFiles(w http.ResponseWriter, r *http.Request) {
+	modelID := chi.URLParam(r, "id")
+	upload, cleanup, err := a.streamSingleUpload(w, r)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	m, err := a.appendStagedUpload(modelID, upload, true, true)
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {
+	modelID := chi.URLParam(r, "id")
+	upload, cleanup, err := a.streamSingleUpload(w, r)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	m, err := a.appendStagedUpload(modelID, upload, false, true)
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
+	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	var rel, thumb sql.NullString
+	var size int64
+	if err := a.db.QueryRow(`SELECT rel_path,size_bytes,thumb_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&rel, &size, &thumb); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM files WHERE id = ? AND model_id = ?`, fileID, modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM jobs WHERE file_id = ?`, fileID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), primary_thumb = CASE WHEN primary_thumb = ? THEN '' ELSE primary_thumb END, updated_at = ? WHERE id = ?`, size, filepath.Base(thumb.String), time.Now().Unix(), modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	root := filepath.Join(a.cfg.DataDir, "models", modelID)
+	if rel.Valid {
+		if path, err := containedPath(root, rel.String); err == nil {
+			_ = os.Remove(path)
+		}
+	}
+	if thumb.Valid && thumb.String != "" {
+		if path, err := containedPath(root, thumb.String); err == nil {
+			_ = os.Remove(path)
+		}
+	}
+	m, err := a.getModel(modelID)
+	if err == nil {
+		err = a.writeSidecar(m)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
+	modelID, imageID := chi.URLParam(r, "id"), chi.URLParam(r, "imageID")
+	var rel string
+	var size int64
+	root := filepath.Join(a.cfg.DataDir, "models", modelID)
+	if err := a.db.QueryRow(`SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if path, err := containedPath(root, rel); err == nil {
+		if st, statErr := os.Stat(path); statErr == nil {
+			size = st.Size()
+		}
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM images WHERE id = ? AND model_id = ?`, imageID, modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), updated_at = ? WHERE id = ?`, size, time.Now().Unix(), modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if path, err := containedPath(root, rel); err == nil {
+		_ = os.Remove(path)
+	}
+	m, err := a.getModel(modelID)
+	if err == nil {
+		err = a.writeSidecar(m)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -271,7 +481,28 @@ func (a *App) serveModelFile(w http.ResponseWriter, r *http.Request, attachment 
 	if attachment {
 		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
 	}
-	http.ServeFile(w, r, filepath.Join(a.cfg.DataDir, "models", modelID, rel))
+	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
+}
+
+func (a *App) handleOwnerImage(w http.ResponseWriter, r *http.Request) {
+	modelID, imageID := chi.URLParam(r, "modelID"), chi.URLParam(r, "imageID")
+	var rel string
+	err := a.db.QueryRow(`SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
 }
 
 func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
@@ -302,33 +533,46 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
-	id := ids.New()
-	now := time.Now().Unix()
-	root := filepath.Join(a.cfg.DataDir, "models", id)
-	stage := filepath.Join(a.cfg.DataDir, "tmp", id)
-	for _, dir := range []string{stage, filepath.Join(stage, "files"), filepath.Join(stage, "images"), filepath.Join(stage, "thumbs")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return Model{}, err
-		}
-	}
-	defer os.RemoveAll(stage)
 	src, err := fh.Open()
 	if err != nil {
 		return Model{}, err
 	}
 	defer src.Close()
-	uploadPath := filepath.Join(stage, filepath.Base(fh.Filename))
+	stage := filepath.Join(a.cfg.DataDir, "tmp", ids.New())
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return Model{}, err
+	}
+	defer os.RemoveAll(stage)
+	uploadPath, err := containedName(stage, filepath.Base(fh.Filename))
+	if err != nil {
+		return Model{}, errors.Join(errBadUpload, err)
+	}
 	if err := copyCapped(uploadPath, src, a.cfg.MaxUploadMB<<20); err != nil {
 		return Model{}, errors.Join(errBadUpload, err)
 	}
-	title := strings.TrimSuffix(filepath.Base(fh.Filename), filepath.Ext(fh.Filename))
+	return a.ingestStagedUpload(stagedUpload{Path: uploadPath, Name: filepath.Base(fh.Filename), StageDir: stage})
+}
+
+func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
+	id := ids.New()
+	now := time.Now().Unix()
+	root := filepath.Join(a.cfg.DataDir, "models", id)
+	stage := upload.StageDir
+	for _, dir := range []string{filepath.Join(stage, "files"), filepath.Join(stage, "images"), filepath.Join(stage, "thumbs")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return Model{}, err
+		}
+	}
+	defer os.RemoveAll(stage)
+	title := strings.TrimSuffix(filepath.Base(upload.Name), filepath.Ext(upload.Name))
 	description := ""
 	var files []ModelFile
 	var images []Image
-	if strings.EqualFold(filepath.Ext(fh.Filename), ".zip") {
-		files, images, description, err = a.extractBundle(stage, uploadPath, id)
+	var err error
+	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
+		files, images, description, err = a.extractBundle(stage, upload.Path, id)
 	} else {
-		files, images, err = a.routeOneFile(stage, uploadPath, filepath.Base(fh.Filename), id)
+		files, images, err = a.routeOneFile(stage, upload.Path, filepath.Base(upload.Name), id)
 	}
 	if err != nil {
 		return Model{}, errors.Join(errBadUpload, err)
@@ -353,9 +597,12 @@ func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
 		return Model{}, err
 	}
 	if err := a.insertModel(model); err != nil {
+		_ = os.RemoveAll(root)
 		return Model{}, err
 	}
 	if err := a.writeSidecar(model); err != nil {
+		_, _ = a.db.Exec(`DELETE FROM models WHERE id = ?`, model.ID)
+		_ = os.RemoveAll(root)
 		return Model{}, err
 	}
 	return model, nil
@@ -449,6 +696,103 @@ func (a *App) routeOneFile(stage, srcPath, name, modelID string) ([]ModelFile, [
 	default:
 		return nil, nil, errors.New("unsupported upload")
 	}
+}
+
+func (a *App) appendStagedUpload(modelID string, upload stagedUpload, allowMeshes, allowImages bool) (Model, error) {
+	if _, err := a.getModel(modelID); err != nil {
+		return Model{}, sql.ErrNoRows
+	}
+	for _, dir := range []string{filepath.Join(upload.StageDir, "files"), filepath.Join(upload.StageDir, "images"), filepath.Join(upload.StageDir, "thumbs")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return Model{}, err
+		}
+	}
+	var files []ModelFile
+	var images []Image
+	var err error
+	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
+		files, images, _, err = a.extractBundle(upload.StageDir, upload.Path, modelID)
+	} else {
+		files, images, err = a.routeOneFile(upload.StageDir, upload.Path, filepath.Base(upload.Name), modelID)
+	}
+	if err != nil {
+		return Model{}, errors.Join(errBadUpload, err)
+	}
+	if !allowMeshes && len(files) > 0 {
+		return Model{}, errors.Join(errBadUpload, errors.New("mesh files are not accepted on this endpoint"))
+	}
+	if !allowImages && len(images) > 0 {
+		return Model{}, errors.Join(errBadUpload, errors.New("images are not accepted on this endpoint"))
+	}
+	if len(files) == 0 && len(images) == 0 {
+		return Model{}, errors.Join(errBadUpload, errors.New("upload contains no accepted files"))
+	}
+	var maxFileOrder, maxImageOrder int
+	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder)
+	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM images WHERE model_id = ?`, modelID).Scan(&maxImageOrder)
+	root := filepath.Join(a.cfg.DataDir, "models", modelID)
+	var total int64
+	for i := range files {
+		files[i].SortOrder = maxFileOrder + i
+		files[i].RelPath = filepath.ToSlash(filepath.Join("files", files[i].ID+"-"+files[i].Filename))
+		dst, err := containedPath(root, files[i].RelPath)
+		if err != nil {
+			return Model{}, err
+		}
+		if err := os.Rename(filepath.Join(upload.StageDir, "files", files[i].Filename), dst); err != nil {
+			return Model{}, err
+		}
+		total += files[i].SizeBytes
+	}
+	for i := range images {
+		images[i].SortOrder = maxImageOrder + i
+		old := images[i].RelPath
+		images[i].RelPath = filepath.ToSlash(filepath.Join("images", images[i].ID+"-"+filepath.Base(old)))
+		dst, err := containedPath(root, images[i].RelPath)
+		if err != nil {
+			return Model{}, err
+		}
+		if err := os.Rename(filepath.Join(upload.StageDir, old), dst); err != nil {
+			return Model{}, err
+		}
+		if st, err := os.Stat(dst); err == nil {
+			total += st.Size()
+		}
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return Model{}, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	for _, f := range files {
+		if _, err := tx.Exec(`INSERT INTO files(id,model_id,filename,rel_path,format,size_bytes,sha256,triangle_count,bbox_x,bbox_y,bbox_z,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			f.ID, modelID, f.Filename, f.RelPath, f.Format, f.SizeBytes, f.SHA256, f.TriangleCount, f.BBoxX, f.BBoxY, f.BBoxZ, f.SortOrder); err != nil {
+			return Model{}, err
+		}
+		if _, err := tx.Exec(`INSERT INTO jobs(id,type,file_id,status,created_at) VALUES(?,?,?,?,?)`, ids.New(), "thumbnail", f.ID, "pending", now); err != nil {
+			return Model{}, err
+		}
+	}
+	for _, img := range images {
+		if _, err := tx.Exec(`INSERT INTO images(id,model_id,rel_path,sort_order) VALUES(?,?,?,?)`, img.ID, modelID, img.RelPath, img.SortOrder); err != nil {
+			return Model{}, err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE models SET total_bytes = total_bytes + ?, updated_at = ? WHERE id = ?`, total, now, modelID); err != nil {
+		return Model{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Model{}, err
+	}
+	m, err := a.getModel(modelID)
+	if err != nil {
+		return Model{}, err
+	}
+	if err := a.writeSidecar(m); err != nil {
+		return Model{}, err
+	}
+	return m, nil
 }
 
 func (a *App) buildFileRecord(modelID, absPath, relPath string, order int) (ModelFile, error) {

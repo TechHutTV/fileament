@@ -1,4 +1,4 @@
-module github.com/brandon/fileament
+module github.com/TechHutTV/fileament
 
 go 1.23.0
 

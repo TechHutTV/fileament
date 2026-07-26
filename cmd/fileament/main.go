@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brandon/fileament/internal/config"
-	"github.com/brandon/fileament/internal/server"
+	"github.com/TechHutTV/fileament/internal/config"
+	"github.com/TechHutTV/fileament/internal/server"
 )
 
 func main() {

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/brandon/fileament/internal/mesh"
+	"github.com/TechHutTV/fileament/internal/mesh"
 )
 
 func TestRenderJPEGProducesNonBlankImage(t *testing.T) {

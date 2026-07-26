@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -123,6 +124,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   a.secureCookies(r),
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -131,8 +133,16 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		_, _ = a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(r)})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) secureCookies(r *http.Request) bool {
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	u, err := url.Parse(a.cfg.BaseURL)
+	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
 func (a *App) validSession(r *http.Request) bool {

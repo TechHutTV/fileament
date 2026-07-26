@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/brandon/fileament/internal/config"
+	"github.com/TechHutTV/fileament/internal/config"
 )
 
 func TestHealthzAndMigrations(t *testing.T) {
@@ -50,7 +50,15 @@ func newTestApp(t *testing.T) *App {
 
 func newTestAppWithPassword(t *testing.T, password string) *App {
 	t.Helper()
-	app, err := New(config.Config{DataDir: t.TempDir(), Port: "0", OwnerPassword: password, MaxUploadMB: 32, ThumbWorkers: 0})
+	return newTestAppWithConfig(t, config.Config{DataDir: t.TempDir(), Port: "0", OwnerPassword: password, MaxUploadMB: 32, ThumbWorkers: 0})
+}
+
+func newTestAppWithConfig(t *testing.T, cfg config.Config) *App {
+	t.Helper()
+	if cfg.Port == "" {
+		cfg.Port = "0"
+	}
+	app, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
