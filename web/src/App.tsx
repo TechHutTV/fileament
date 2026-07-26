@@ -264,7 +264,7 @@ function PublicPage({ token }: { token: string }) {
   const { data, isError } = useQuery<{ model?: Model; collection?: Collection }>({ queryKey: ['public', token], queryFn: () => api(`/api/public/${token}`) });
   if (isError) return <Shell><Empty text="Share not available" /></Shell>;
   const model = data?.model ?? data?.collection?.models?.find((m) => m.id === selected) ?? data?.collection?.models?.[0];
-  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip">{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
+  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
 }
 
 function PublicModel({ model, token }: { model: Model; token: string }) {
