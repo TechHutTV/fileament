@@ -91,5 +91,28 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS models_fts USING fts5(title, description, tags, content='', tokenize='porter unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS models_fts USING fts5(title, description, tags, content='', contentless_delete=1, tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS models_ai AFTER INSERT ON models BEGIN
+  INSERT INTO models_fts(rowid, title, description, tags) VALUES (new.rowid, new.title, new.description, '');
+END;
+CREATE TRIGGER IF NOT EXISTS models_au AFTER UPDATE OF title, description ON models BEGIN
+  DELETE FROM models_fts WHERE rowid = old.rowid;
+  INSERT INTO models_fts(rowid, title, description, tags)
+  VALUES (new.rowid, new.title, new.description, COALESCE((SELECT group_concat(tags.name, ' ') FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = new.id), ''));
+END;
+CREATE TRIGGER IF NOT EXISTS models_ad AFTER DELETE ON models BEGIN
+  DELETE FROM models_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS model_tags_ai AFTER INSERT ON model_tags BEGIN
+  DELETE FROM models_fts WHERE rowid = (SELECT rowid FROM models WHERE id = new.model_id);
+  INSERT INTO models_fts(rowid, title, description, tags)
+  SELECT rowid, title, description, COALESCE((SELECT group_concat(tags.name, ' ') FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = new.model_id), '')
+  FROM models WHERE id = new.model_id;
+END;
+CREATE TRIGGER IF NOT EXISTS model_tags_ad AFTER DELETE ON model_tags BEGIN
+  DELETE FROM models_fts WHERE rowid = (SELECT rowid FROM models WHERE id = old.model_id);
+  INSERT INTO models_fts(rowid, title, description, tags)
+  SELECT rowid, title, description, COALESCE((SELECT group_concat(tags.name, ' ') FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = old.model_id), '')
+  FROM models WHERE id = old.model_id;
+END;
 `

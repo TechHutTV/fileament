@@ -480,9 +480,6 @@ func (a *App) insertModel(model Model) error {
 		model.ID, model.Title, model.Description, model.TotalBytes, model.CreatedAt, model.UpdatedAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO models_fts(rowid, title, description, tags) VALUES((SELECT rowid FROM models WHERE id = ?), ?, ?, '')`, model.ID, model.Title, model.Description); err != nil {
-		return err
-	}
 	for _, f := range model.Files {
 		if _, err := tx.Exec(`INSERT INTO files(id,model_id,filename,rel_path,format,size_bytes,sha256,triangle_count,bbox_x,bbox_y,bbox_z,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			f.ID, model.ID, f.Filename, f.RelPath, f.Format, f.SizeBytes, f.SHA256, f.TriangleCount, f.BBoxX, f.BBoxY, f.BBoxZ, f.SortOrder); err != nil {
@@ -578,9 +575,6 @@ func (a *App) updateModel(m Model) error {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO model_tags(model_id, tag_id) VALUES(?, (SELECT id FROM tags WHERE slug = ?))`, m.ID, slug); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO models_fts(rowid, title, description, tags) VALUES((SELECT rowid FROM models WHERE id = ?), ?, ?, ?)`, m.ID, m.Title, m.Description, strings.Join(m.Tags, " ")); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
