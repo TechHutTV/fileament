@@ -77,6 +77,7 @@ func (a *App) Router() http.Handler {
 	r.Post("/api/auth/logout", a.handleLogout)
 	r.With(a.requireAuth).Get("/api/storage", a.handleStorageStats)
 	a.mountModelRoutes(r)
+	a.mountCollectionRoutes(r)
 	a.mountThumbRoutes(r)
 	r.Get("/*", a.serveSPA)
 	return r

@@ -37,13 +37,19 @@ export function Root() {
 }
 
 export function App() {
+  const path = window.location.pathname;
+  if (path.startsWith('/s/')) return <PublicPage token={path.split('/')[2]} />;
+  return <OwnerApp />;
+}
+
+function OwnerApp() {
   const [dark, setDark] = useState(localStorage.getItem('fileament-theme') === 'dark');
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     localStorage.setItem('fileament-theme', dark ? 'dark' : 'light');
   }, [dark]);
-  const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   const path = window.location.pathname;
+  const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   if (me.isLoading) return <main className="app"><div className="empty">Loading</div></main>;
   if (me.data?.setupRequired) return <AuthScreen mode="setup" />;
   if (!me.data?.authenticated) return <AuthScreen mode="login" />;
@@ -58,7 +64,7 @@ export function App() {
           <button className="icon" onClick={() => setDark(!dark)} title="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
         </div>
       </nav>
-      {path.startsWith('/models/') ? <Detail id={path.split('/')[2]} /> : path === '/upload' ? <UploadPage /> : path === '/settings' ? <SettingsPage /> : <Catalog />}
+      {path.startsWith('/models/') ? <Detail id={path.split('/')[2]} /> : path.startsWith('/collections/') ? <CollectionDetail slug={path.split('/')[2]} /> : path === '/collections' ? <CollectionsPage /> : path === '/upload' ? <UploadPage /> : path === '/settings' ? <SettingsPage /> : <Catalog />}
     </main>
   );
 }
@@ -163,7 +169,36 @@ function UploadPage() {
 
 function SettingsPage() {
   const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
-  return <section className="content narrow"><h1>Settings</h1><p>Storage: {formatBytes(data?.totalBytes ?? 0)}</p></section>;
+  const { data: shares } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
+  return <section className="content narrow"><h1>Settings</h1><p>Storage: {formatBytes(data?.totalBytes ?? 0)}</p><h2>Share links</h2>{shares?.map((s) => <div className="file" key={s.id}><span>{s.label || s.scope}</span><a href={`/s/${s.token}`}>Open</a></div>)}</section>;
+}
+
+type Collection = { id: string; name: string; slug: string; description: string; models?: Model[] };
+type Share = { id: string; token: string; scope: string; label?: string };
+
+function CollectionsPage() {
+  const { data } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
+  return <section className="content"><div className="grid">{(data ?? []).map((c) => <a className="card" href={`/collections/${c.slug}`} key={c.id}><div className="thumb"><Box size={42} /></div><h2>{c.name}</h2><p>{c.description}</p></a>)}</div></section>;
+}
+
+function CollectionDetail({ slug }: { slug: string }) {
+  const { data } = useQuery<Collection>({ queryKey: ['collection', slug], queryFn: () => api(`/api/collections/${slug}`) });
+  return <section className="content"><h1>{data?.name}</h1><p>{data?.description}</p><div className="grid">{data?.models?.map((model) => <ModelCard model={model} key={model.id} />)}</div></section>;
+}
+
+function PublicPage({ token }: { token: string }) {
+  const { data } = useQuery<{ model?: Model; collection?: Collection }>({ queryKey: ['public', token], queryFn: () => api(`/api/public/${token}`) });
+  if (data?.collection) {
+    return <main className="app"><section className="content"><h1>{data.collection.name}</h1><div className="grid">{data.collection.models?.map((model) => <PublicCard model={model} token={token} key={model.id} />)}</div></section></main>;
+  }
+  if (data?.model) {
+    return <main className="app"><section className="detail"><div className="viewer"><PublicCard model={data.model} token={token} /></div><aside className="panel"><h1>{data.model.title}</h1><p>{data.model.description}</p>{data.model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}</a>)}</aside></section></main>;
+  }
+  return <main className="app"><div className="empty">Loading</div></main>;
+}
+
+function PublicCard({ model, token }: { model: Model; token: string }) {
+  return <a className="card" href={`/s/${token}`}><div className="thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt="" /> : <Box size={42} />}</div><h2>{model.title}</h2><p>{formatBytes(model.totalBytes)}</p></a>;
 }
 
 async function api(path: string, init: RequestInit = {}) {
