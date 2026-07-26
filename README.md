@@ -14,7 +14,23 @@ Fileament is a self-hosted catalog for a personal 3D printing model library. It 
 - Owner assets under `/files`, `/mesh`, `/thumbs`, and `/images` require authentication.
 - Read-only public share links for models or collections with expiry, revoke, hit counts, `noindex`, and token-scoped file, mesh, image, and thumbnail routes.
 
-## Run With Docker
+## Run the Prebuilt Container
+
+Stable releases are published to GitHub Container Registry for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker pull ghcr.io/techhuttv/fileament:latest
+docker run --rm -p 8080:8080 \
+  -e FILEAMENT_OWNER_PASSWORD='change-this-password' \
+  -v fileament-data:/data \
+  ghcr.io/techhuttv/fileament:latest
+```
+
+Use a versioned tag such as `1.0.0` instead of `latest` to pin deployments to a specific release.
+
+Open `http://localhost:8080`.
+
+## Build Locally With Docker
 
 ```sh
 docker build -t fileament .
