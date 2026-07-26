@@ -83,6 +83,7 @@ func (a *App) Router() http.Handler {
 	r.Post("/api/auth/setup", a.handleSetup)
 	r.Post("/api/auth/login", a.handleLogin)
 	r.Post("/api/auth/logout", a.handleLogout)
+	r.With(a.requireAuth).Post("/api/auth/password", a.handleChangePassword)
 	r.With(a.requireAuth).Get("/api/storage", a.handleStorageStats)
 	a.mountModelRoutes(r)
 	a.mountCollectionRoutes(r)

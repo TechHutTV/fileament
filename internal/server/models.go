@@ -89,18 +89,30 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
+	collection := strings.TrimSpace(r.URL.Query().Get("collection"))
+	sortKey := strings.TrimSpace(r.URL.Query().Get("sort"))
 	args := []any{}
 	where := []string{"1=1"}
 	join := ""
 	if q != "" {
-		join += " JOIN models_fts fts ON fts.rowid = models.rowid"
-		where = append(where, "models_fts MATCH ?")
-		args = append(args, ftsQuery(q))
+		query := ftsQuery(q)
+		if query == "" {
+			where = append(where, "1=0")
+		} else {
+			join += " JOIN models_fts ON models_fts.rowid = models.rowid"
+			where = append(where, "models_fts MATCH ?")
+			args = append(args, query)
+		}
 	}
 	if tag != "" {
 		join += " JOIN model_tags mt ON mt.model_id = models.id JOIN tags tg ON tg.id = mt.tag_id"
 		where = append(where, "tg.slug = ?")
 		args = append(args, tag)
+	}
+	if collection != "" {
+		join += " JOIN collection_models cm ON cm.model_id = models.id JOIN collections c ON c.id = cm.collection_id"
+		where = append(where, "(c.id = ? OR c.slug = ?)")
+		args = append(args, collection, collection)
 	}
 	if cursor != "" {
 		created, id := decodeCursor(cursor)
@@ -110,7 +122,20 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args = append(args, limit+1)
-	rows, err := a.db.Query(`SELECT DISTINCT models.id FROM models`+join+` WHERE `+strings.Join(where, " AND ")+` ORDER BY models.created_at DESC, models.id DESC LIMIT ?`, args...)
+	order := "models.created_at DESC, models.id DESC"
+	switch sortKey {
+	case "updated":
+		order = "models.updated_at DESC, models.id DESC"
+	case "title":
+		order = "models.title COLLATE NOCASE ASC, models.id ASC"
+	case "size":
+		order = "models.total_bytes DESC, models.id DESC"
+	case "", "created":
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("unsupported sort"))
+		return
+	}
+	rows, err := a.db.Query(`SELECT DISTINCT models.id FROM models`+join+` WHERE `+strings.Join(where, " AND ")+` ORDER BY `+order+` LIMIT ?`, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -953,10 +978,23 @@ func decodeCursor(raw string) (int64, string) {
 
 func ftsQuery(q string) string {
 	parts := strings.Fields(q)
-	for i, p := range parts {
-		parts[i] = strings.Trim(p, `"'*`) + "*"
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.Trim(p, `"'*`)
+		p = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+				return r
+			}
+			return ' '
+		}, p)
+		for _, token := range strings.Fields(p) {
+			out = append(out, `"`+strings.ReplaceAll(token, `"`, `""`)+`"*`)
+		}
 	}
-	return strings.Join(parts, " ")
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, " OR ")
 }
 
 func normalizeTags(tags []string) []string {

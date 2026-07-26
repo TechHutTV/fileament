@@ -25,6 +25,11 @@ type passwordRequest struct {
 	Password string `json:"password"`
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
 func (a *App) seedOwnerPassword() error {
 	exists, err := a.ownerExists()
 	if err != nil || exists || a.cfg.OwnerPassword == "" {
@@ -134,6 +139,38 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(r)})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.NewPassword) < 12 {
+		writeError(w, http.StatusBadRequest, errors.New("password must be at least 12 characters"))
+		return
+	}
+	var encoded string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
+		writeError(w, http.StatusConflict, errors.New("owner setup required"))
+		return
+	}
+	ok, err := verifyPassword(req.CurrentPassword, encoded)
+	if err != nil || !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("invalid current password"))
+		return
+	}
+	hash, err := hashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := a.db.Exec(`UPDATE settings SET value = ? WHERE key = ?`, hash, ownerHashKey); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

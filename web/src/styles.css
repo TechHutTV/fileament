@@ -21,7 +21,9 @@ a {
 }
 
 button,
-input {
+input,
+textarea,
+select {
   font: inherit;
 }
 
@@ -36,6 +38,20 @@ button {
   gap: 8px;
   min-height: 40px;
   padding: 0 14px;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid color-mix(in srgb, #1e6b58 55%, transparent);
+  outline-offset: 2px;
+}
+
+button.danger,
+.danger {
+  background: #9f2f2f;
 }
 
 .app {
@@ -96,7 +112,13 @@ button {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-bottom: 18px;
+}
+
+.multi {
+  align-items: end;
 }
 
 .search {
@@ -115,6 +137,29 @@ button {
   flex: 1;
   min-width: 0;
   outline: 0;
+}
+
+.select,
+label {
+  display: grid;
+  gap: 6px;
+}
+
+.select select,
+label input,
+label textarea {
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 7px;
+  color: inherit;
+  min-height: 40px;
+  padding: 0 10px;
+}
+
+label textarea {
+  min-height: 90px;
+  padding: 9px 10px;
+  resize: vertical;
 }
 
 .grid {
@@ -164,6 +209,10 @@ button {
   min-height: calc(100vh - 69px);
 }
 
+.detail.public {
+  grid-template-columns: minmax(0, 1fr) 380px;
+}
+
 .viewer {
   min-height: 520px;
 }
@@ -171,6 +220,7 @@ button {
 .panel {
   border-left: 1px solid color-mix(in srgb, currentColor 14%, transparent);
   padding: 24px;
+  overflow: auto;
 }
 
 .panel h1 {
@@ -196,15 +246,37 @@ button {
   padding: 4px 8px;
 }
 
+.meta {
+  color: color-mix(in srgb, currentColor 70%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
 .file {
   border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
   justify-content: space-between;
   min-height: 42px;
+  padding: 6px 0;
 }
 
 .file span {
   color: color-mix(in srgb, currentColor 62%, transparent);
   margin-left: auto;
+}
+
+.file a {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.file small {
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  margin-left: auto;
+  padding: 0 8px;
 }
 
 .auth {
@@ -215,10 +287,25 @@ button {
 }
 
 .auth form,
-.upload {
+.upload,
+.stack {
   display: grid;
   gap: 14px;
   width: min(420px, calc(100vw - 32px));
+}
+
+.panel .stack,
+.panel .upload {
+  width: 100%;
+}
+
+.inline-form {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+  width: 100%;
 }
 
 .auth input,
@@ -227,6 +314,73 @@ button {
   border-radius: 7px;
   min-height: 42px;
   padding: 0 10px;
+}
+
+.checks {
+  display: grid;
+  gap: 8px;
+}
+
+.checks label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.images {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+}
+
+.images figure {
+  aspect-ratio: 1;
+  margin: 0;
+  position: relative;
+}
+
+.images img,
+.wide-image {
+  border-radius: 8px;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.images .icon {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+}
+
+.markdown p {
+  line-height: 1.5;
+}
+
+.collection-strip {
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  display: flex;
+  gap: 8px;
+  grid-column: 1 / -1;
+  overflow-x: auto;
+  padding: 10px;
+}
+
+.collection-strip a {
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 7px;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+}
+
+.collection-strip .active {
+  background: #1e6b58;
+  color: white;
+}
+
+.load {
+  margin: 20px auto 0;
 }
 
 .error {

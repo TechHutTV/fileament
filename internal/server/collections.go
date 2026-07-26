@@ -86,8 +86,14 @@ func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("name is required"))
 		return
 	}
+	if c.CoverModelID != "" {
+		if _, err := a.getModel(c.CoverModelID); err != nil {
+			writeError(w, http.StatusNotFound, errors.New("cover model not found"))
+			return
+		}
+	}
 	if _, err := a.db.Exec(`INSERT INTO collections(id,name,slug,description,cover_model_id,created_at) VALUES(?,?,?,?,NULLIF(?,''),?)`, c.ID, c.Name, c.Slug, c.Description, c.CoverModelID, c.CreatedAt); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusConflict, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, c)
@@ -110,22 +116,48 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Name != "" {
+		if req.CoverModelID != "" {
+			if _, err := a.getModel(req.CoverModelID); err != nil {
+				writeError(w, http.StatusNotFound, errors.New("cover model not found"))
+				return
+			}
+		}
 		if _, err := a.db.Exec(`UPDATE collections SET name=?, slug=?, description=?, cover_model_id=NULLIF(?, '') WHERE id=?`, req.Name, slugify(req.Name), req.Description, req.CoverModelID, id); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+			writeError(w, http.StatusConflict, err)
 			return
 		}
 	}
-	c, _ := a.getCollection(id)
+	c, err := a.getCollection(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, c)
 }
 
 func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
-	_, _ = a.db.Exec(`DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
+	res, err := a.db.Exec(`DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 	id, mid := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
+	if _, err := a.getCollection(id); err != nil {
+		writeError(w, http.StatusNotFound, errors.New("collection not found"))
+		return
+	}
+	if _, err := a.getModel(mid); err != nil {
+		writeError(w, http.StatusNotFound, errors.New("model not found"))
+		return
+	}
 	var n int
 	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM collection_models WHERE collection_id = ?`, id).Scan(&n)
 	if _, err := a.db.Exec(`INSERT OR REPLACE INTO collection_models(collection_id, model_id, sort_order) VALUES(?,?,?)`, id, mid, n); err != nil {
@@ -136,7 +168,15 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request) {
-	_, _ = a.db.Exec(`DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, chi.URLParam(r, "id"), chi.URLParam(r, "mid"))
+	res, err := a.db.Exec(`DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, chi.URLParam(r, "id"), chi.URLParam(r, "mid"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -188,6 +228,23 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("scope must be model or collection"))
 		return
 	}
+	if req.TargetID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("targetId is required"))
+		return
+	}
+	if req.ExpiresAt > 0 && req.ExpiresAt <= time.Now().Unix() {
+		writeError(w, http.StatusBadRequest, errors.New("expiresAt must be in the future"))
+		return
+	}
+	if req.Scope == "model" {
+		if _, err := a.getModel(req.TargetID); err != nil {
+			writeError(w, http.StatusNotFound, errors.New("model not found"))
+			return
+		}
+	} else if _, err := a.getCollection(req.TargetID); err != nil {
+		writeError(w, http.StatusNotFound, errors.New("collection not found"))
+		return
+	}
 	token, err := randomBase62(22)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -202,7 +259,15 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
-	_, _ = a.db.Exec(`UPDATE share_links SET revoked_at = ? WHERE id = ?`, time.Now().Unix(), chi.URLParam(r, "id"))
+	res, err := a.db.Exec(`UPDATE share_links SET revoked_at = ? WHERE id = ?`, time.Now().Unix(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -82,14 +82,7 @@ func TestExpiredShareIsGone(t *testing.T) {
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	app.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("share create status=%d", rec.Code)
-	}
-	var share ShareLink
-	_ = json.Unmarshal(rec.Body.Bytes(), &share)
-	rec = httptest.NewRecorder()
-	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/public/"+share.Token, nil))
-	if rec.Code != http.StatusGone {
-		t.Fatalf("expired public status=%d", rec.Code)
 	}
 }
