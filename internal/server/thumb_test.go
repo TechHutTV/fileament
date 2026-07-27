@@ -250,14 +250,14 @@ endsolid large`,
 			t.Fatal(err)
 		}
 	}
-	var selected ModelFile
-	for _, file := range model.Files {
-		if file.Filename == "small.stl" {
+	if len(model.Files) != 2 {
+		t.Fatalf("model files = %d, want 2", len(model.Files))
+	}
+	selected := model.Files[0]
+	for _, file := range model.Files[1:] {
+		if file.SizeBytes < selected.SizeBytes {
 			selected = file
 		}
-	}
-	if selected.ID == "" {
-		t.Fatal("small file not found")
 	}
 	thumbDir := filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs")
 	selectedPNG := filepath.Join(thumbDir, selected.ID+".png")
