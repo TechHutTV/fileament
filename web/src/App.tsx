@@ -252,7 +252,7 @@ function UploadPage() {
   const [dragging, setDragging] = useState(false);
   const sequence = useRef(0);
   const input = useRef<HTMLInputElement>(null);
-  const controllers = useRef(new Map<string, AbortController>());
+  const pending = useRef(new Set<string>());
   const cancelled = useRef(new Set<string>());
   const uploadChain = useRef<Promise<void>>(Promise.resolve());
 
@@ -261,13 +261,11 @@ function UploadPage() {
   };
 
   const uploadItem = async (item: UploadItem) => {
-    const controller = new AbortController();
-    controllers.current.set(item.key, controller);
     updateItem(item.key, { status: 'uploading' });
     const body = new FormData();
     body.append('file', item.file);
     try {
-      const model = await api('/api/models', { method: 'POST', body, signal: controller.signal }) as Model;
+      const model = await api('/api/models', { method: 'POST', body }) as Model;
       if (cancelled.current.has(item.key)) {
         try {
           await api(`/api/models/${model.id}`, { method: 'DELETE' });
@@ -284,12 +282,12 @@ function UploadPage() {
       updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing' });
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
-    } catch (error) {
-      if (!cancelled.current.has(item.key) && (error as Error).name !== 'AbortError') {
+    } catch {
+      if (!cancelled.current.has(item.key)) {
         updateItem(item.key, { status: 'error', error: 'Upload failed. Remove it and try again.' });
       }
     } finally {
-      controllers.current.delete(item.key);
+      pending.current.delete(item.key);
       cancelled.current.delete(item.key);
     }
   };
@@ -297,10 +295,12 @@ function UploadPage() {
   const addFiles = (files: FileList | File[]) => {
     const queued = Array.from(files).map((file) => ({ key: `upload-${++sequence.current}`, file, status: 'queued' as const }));
     if (queued.length === 0) return;
+    queued.forEach((item) => pending.current.add(item.key));
     setItems((current) => [...current, ...queued]);
     queued.forEach((item) => {
       uploadChain.current = uploadChain.current.then(async () => {
         if (cancelled.current.has(item.key)) {
+          pending.current.delete(item.key);
           cancelled.current.delete(item.key);
           return;
         }
@@ -311,7 +311,6 @@ function UploadPage() {
 
   const removeItem = async (item: UploadItem) => {
     cancelled.current.add(item.key);
-    controllers.current.get(item.key)?.abort();
     if (!item.model) {
       setItems((current) => current.filter((candidate) => candidate.key !== item.key));
       return;
@@ -341,7 +340,7 @@ function UploadPage() {
     return () => events.close();
   }, []);
 
-  useEffect(() => () => { controllers.current.forEach((controller) => controller.abort()); }, []);
+  useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
 
   const active = items.some((item) => item.status === 'queued' || item.status === 'uploading' || item.status === 'removing');
   const completed = items.filter((item) => item.status === 'ready' || item.status === 'processing').length;
@@ -389,7 +388,7 @@ function UploadPage() {
 function SettingsPage() {
   const qc = useQueryClient();
   const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
-  const { data: shares, isLoading: sharesLoading } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
+  const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const revoke = useMutation({ mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -403,8 +402,9 @@ function SettingsPage() {
     </section>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Link2 size={19} />} title="Share links" description="Review and revoke public links created for models and collections." />
+      {sharesError && <Empty text="Share links could not be loaded" />}
       {sharesLoading && <Empty text="Loading share links" />}
-      {!sharesLoading && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
+      {!sharesLoading && !sharesError && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
       {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small><button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button></div>)}
     </section>
   </section>;
@@ -413,7 +413,7 @@ function SettingsPage() {
 function CollectionsPage() {
   const qc = useQueryClient();
   const [formVersion, setFormVersion] = useState(0);
-  const { data, isLoading } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
+  const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { setFormVersion((version) => version + 1); qc.invalidateQueries({ queryKey: ['collections'] }); } });
   return <section className="content page-content collections-page">
     <PageHeader eyebrow="Organize your library" title="Collections" description="Group related models into focused sets for projects, printers, or workflows." />
@@ -421,8 +421,9 @@ function CollectionsPage() {
       <SectionHeading icon={<Folder size={19} />} title="Create a collection" description="Start a new group and add models from their detail pages." />
       <CollectionForm key={formVersion} onSave={(body) => create.mutate(body)} />
     </section>
+    {isError && <Empty text="Collections could not be loaded" />}
     {isLoading && <Empty text="Loading collections" />}
-    {!isLoading && (data?.length ?? 0) === 0 && <EmptyState icon={<Folder size={28} />} title="No collections yet" text="Create your first collection above, then add models from your library." />}
+    {!isLoading && !isError && (data?.length ?? 0) === 0 && <EmptyState icon={<Folder size={28} />} title="No collections yet" text="Create your first collection above, then add models from your library." />}
     <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelIds?.length ?? c.models?.length ?? 0; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className="collection-cover"><Folder size={34} aria-hidden /><span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
   </section>;
 }

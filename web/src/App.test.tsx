@@ -125,12 +125,19 @@ test('keeps a cancelled upload visible when server cleanup fails', async () => {
   window.history.pushState({}, '', '/upload');
   let releaseUpload: (response: Response) => void = () => undefined;
   const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const uploadState = {
+    signal: undefined as AbortSignal | undefined,
+    wasAborted() { return this.signal?.aborted ?? false; },
+  };
   const calls: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
-    if (url === '/api/models' && init?.method === 'POST') return uploadResponse;
+    if (url === '/api/models' && init?.method === 'POST') {
+      uploadState.signal = init.signal as AbortSignal | undefined;
+      return uploadResponse;
+    }
     if (url === '/api/models/delayed.stl' && init?.method === 'DELETE') return new Response('cleanup failed', { status: 500 });
     return Response.json({});
   }));
@@ -139,11 +146,46 @@ test('keeps a cancelled upload visible when server cleanup fails', async () => {
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['solid delayed'], 'delayed.stl')] } });
   fireEvent.click(await screen.findByRole('button', { name: 'Cancel delayed.stl upload' }));
+  expect(uploadState.wasAborted()).toBe(false);
   releaseUpload(Response.json({ ...model, id: 'delayed.stl', title: 'delayed.stl' }, { status: 201 }));
 
   await waitFor(() => expect(calls).toContain('DELETE /api/models/delayed.stl'));
   expect(await screen.findByText('Upload completed, but could not remove the model.')).toBeInTheDocument();
   expect(screen.getByText('delayed.stl')).toBeInTheDocument();
+});
+
+test('cleans up active uploads and skips queued uploads after unmount', async () => {
+  window.history.pushState({}, '', '/upload');
+  let releaseUpload: (response: Response) => void = () => undefined;
+  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const uploads: string[] = [];
+  const deleted: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      uploads.push(file.name);
+      return uploads.length === 1
+        ? uploadResponse
+        : Response.json({ ...model, id: file.name, title: file.name }, { status: 201 });
+    }
+    if (url.startsWith('/api/models/') && init?.method === 'DELETE') {
+      deleted.push(url);
+      return new Response(null, { status: 204 });
+    }
+    return Response.json({});
+  }));
+  const view = renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'active.stl'), new File(['b'], 'queued.stl')] } });
+  await waitFor(() => expect(uploads).toEqual(['active.stl']));
+  view.unmount();
+  releaseUpload(Response.json({ ...model, id: 'active.stl', title: 'active.stl' }, { status: 201 }));
+
+  await waitFor(() => expect(deleted).toEqual(['/api/models/active.stl']));
+  expect(uploads).toEqual(['active.stl']);
 });
 
 test('catalog exposes filters, sorting, pagination, and owner nav', async () => {
@@ -200,6 +242,34 @@ test('polishes empty collections and settings with active navigation and grouped
   expect(await screen.findByText('2.0 KB')).toBeInTheDocument();
   expect(await screen.findByText('No share links yet')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('aria-current', 'page');
+});
+
+test('reports a collections query failure instead of an empty state', async () => {
+  window.history.pushState({}, '', '/collections');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (String(input).includes('/api/collections')) return new Response('failed', { status: 500 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByText('Collections could not be loaded')).toBeInTheDocument();
+  expect(screen.queryByText('No collections yet')).not.toBeInTheDocument();
+});
+
+test('reports a share-links query failure instead of an empty state', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return new Response('failed', { status: 500 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByText('Share links could not be loaded')).toBeInTheDocument();
+  expect(screen.queryByText('No share links yet')).not.toBeInTheDocument();
 });
 
 test('detail management actions call owner APIs and preserve viewer gate', async () => {
@@ -269,5 +339,5 @@ test('public collection cards select models within the same share and use token 
 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
 }
