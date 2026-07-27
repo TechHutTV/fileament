@@ -25,6 +25,7 @@ type App struct {
 	db       *sql.DB
 	stop     chan struct{}
 	workerWG sync.WaitGroup
+	thumbMu  sync.Mutex
 	eventsMu sync.Mutex
 	events   map[chan ThumbnailEvent]struct{}
 }
@@ -56,6 +57,10 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 	if err := app.rebuildCollectionsFromSidecar(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := app.refreshThumbnailRenderVersion(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

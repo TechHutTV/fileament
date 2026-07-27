@@ -188,11 +188,11 @@ func TestLargestMeshBecomesDefaultCardRegardlessOfJobOrder(t *testing.T) {
 	if err := app.processNextThumbnail(); err != nil {
 		t.Fatal(err)
 	}
-	card, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", "card.jpg"))
+	card, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", "card.png"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	large, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", model.Files[1].ID+".jpg"))
+	large, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", model.Files[1].ID+".png"))
 	if err != nil {
 		t.Fatal(err)
 	}
