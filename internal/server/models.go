@@ -586,16 +586,35 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.thumbMu.Lock()
+	defer a.thumbMu.Unlock()
 	var thumb sql.NullString
 	if err := a.db.QueryRow(`SELECT thumb_path FROM files WHERE id = ? AND model_id = ?`, req.FileID, id).Scan(&thumb); err != nil || !thumb.Valid {
 		writeError(w, http.StatusBadRequest, errors.New("thumbnail is not available"))
 		return
 	}
-	if err := copyFile(filepath.Join(a.cfg.DataDir, "models", id, "thumbs", "card.jpg"), filepath.Join(a.cfg.DataDir, "models", id, thumb.String)); err != nil {
+	thumbName := filepath.Base(thumb.String)
+	if thumb.String != filepath.ToSlash(filepath.Join("thumbs", thumbName)) {
+		writeError(w, http.StatusBadRequest, errors.New("thumbnail path is not supported"))
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(thumbName))
+	if ext != ".jpg" && ext != ".png" {
+		writeError(w, http.StatusBadRequest, errors.New("thumbnail format is not supported"))
+		return
+	}
+	thumbDir := filepath.Join(a.cfg.DataDir, "models", id, "thumbs")
+	sourcePath, err := containedName(thumbDir, thumbName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("thumbnail path is not supported"))
+		return
+	}
+	cardName := "card" + ext
+	if err := copyFile(filepath.Join(thumbDir, cardName), sourcePath); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.jpg', updated_at = ? WHERE id = ?`, time.Now().Unix(), id); err != nil {
+	if _, err := a.db.Exec(`UPDATE models SET primary_thumb = ?, updated_at = ? WHERE id = ?`, cardName, time.Now().Unix(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

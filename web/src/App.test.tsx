@@ -41,25 +41,217 @@ test('accepts an empty setup success response and transitions to login', async (
   renderApp();
   expect(await screen.findByText('Set owner password')).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse password' } });
+  fireEvent.click(screen.getByRole('button', { name: /show password/i }));
+  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'text');
   fireEvent.click(screen.getByRole('button', { name: /create owner/i }));
   await waitFor(() => expect(calls).toContain('POST /api/auth/setup'));
   expect(await screen.findByText('Owner login')).toBeInTheDocument();
+  expect(screen.getByText('Your 3D files, organized.')).toBeInTheDocument();
+  expect(screen.getByLabelText('Password')).toHaveValue('');
+  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'password');
   expect(screen.queryByText('Authentication failed')).not.toBeInTheDocument();
+});
+
+test('manages a dropped multi-model upload queue', async () => {
+  window.history.pushState({}, '', '/upload');
+  const uploads: string[] = [];
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      uploads.push(file.name);
+      return Response.json({
+        ...model,
+        id: file.name,
+        title: file.name,
+        totalBytes: file.size,
+        primaryThumb: 'card.png',
+        files: [{ ...model.files[0], id: `${file.name}-file`, modelId: file.name, filename: file.name, sizeBytes: file.size }],
+      }, { status: 201 });
+    }
+    if (url.startsWith('/api/models/') && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    if (url.includes('/api/models?')) return Response.json({ items: [], nextCursor: '' });
+    if (url.includes('/api/collections') || url.includes('/api/tags')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  expect(screen.getByLabelText(/choose 3d files/i)).toHaveAttribute('multiple');
+  const cube = new File(['solid cube'], 'cube.stl', { type: 'model/stl' });
+  const bracket = new File(['solid bracket'], 'bracket.stl', { type: 'model/stl' });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [cube, bracket] } });
+
+  await waitFor(() => expect(uploads).toEqual(['cube.stl', 'bracket.stl']));
+  expect(await screen.findByAltText('cube.stl thumbnail')).toHaveAttribute('src', '/thumbs/cube.stl/card.png');
+  expect(screen.getByAltText('bracket.stl thumbnail')).toHaveAttribute('src', '/thumbs/bracket.stl/card.png');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove cube.stl' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
+  expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: /finish and view library/i }));
+  expect(window.location.pathname).toBe('/');
+});
+
+test('serializes automatic uploads to avoid concurrent database writes', async () => {
+  window.history.pushState({}, '', '/upload');
+  const uploads: string[] = [];
+  let releaseFirst: (response: Response) => void = () => undefined;
+  const firstResponse = new Promise<Response>((resolve) => { releaseFirst = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      uploads.push(file.name);
+      if (uploads.length === 1) return firstResponse;
+      return Response.json({ ...model, id: file.name, title: file.name }, { status: 201 });
+    }
+    return Response.json({});
+  }));
+  renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.stl'), new File(['b'], 'second.stl')] } });
+
+  await waitFor(() => expect(uploads).toEqual(['first.stl']));
+  releaseFirst(Response.json({ ...model, id: 'first.stl', title: 'first.stl' }, { status: 201 }));
+  await waitFor(() => expect(uploads).toEqual(['first.stl', 'second.stl']));
+});
+
+test('reconciles a thumbnail event that arrives before the upload response', async () => {
+  window.history.pushState({}, '', '/upload');
+  let thumbnail: EventListener = () => undefined;
+  vi.stubGlobal('EventSource', class {
+    addEventListener(event: string, listener: EventListener) {
+      if (event === 'thumbnail') thumbnail = listener;
+    }
+    close = vi.fn();
+  });
+  let releaseUpload: (response: Response) => void = () => undefined;
+  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') return uploadResponse;
+    if (url === '/api/models/race.stl') return Response.json({ ...model, id: 'race.stl', title: 'race.stl', primaryThumb: 'card.png' });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['race'], 'race.stl')] } });
+  await screen.findByText('Uploading');
+  thumbnail(new MessageEvent('thumbnail', { data: JSON.stringify({ modelId: 'race.stl' }) }));
+  await waitFor(() => expect(calls).toContain('GET /api/models/race.stl'));
+  releaseUpload(Response.json({ ...model, id: 'race.stl', title: 'race.stl', primaryThumb: undefined }, { status: 201 }));
+
+  expect(await screen.findByAltText('race.stl thumbnail')).toHaveAttribute('src', '/thumbs/race.stl/card.png');
+  expect(calls.filter((call) => call === 'GET /api/models/race.stl')).toHaveLength(2);
+});
+
+test('keeps a cancelled upload visible when server cleanup fails', async () => {
+  window.history.pushState({}, '', '/upload');
+  let releaseUpload: (response: Response) => void = () => undefined;
+  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const uploadState = {
+    signal: undefined as AbortSignal | undefined,
+    wasAborted() { return this.signal?.aborted ?? false; },
+  };
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      uploadState.signal = init.signal as AbortSignal | undefined;
+      return uploadResponse;
+    }
+    if (url === '/api/models/delayed.stl' && init?.method === 'DELETE') return new Response('cleanup failed', { status: 500 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['solid delayed'], 'delayed.stl')] } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Cancel delayed.stl upload' }));
+  expect(uploadState.wasAborted()).toBe(false);
+  releaseUpload(Response.json({ ...model, id: 'delayed.stl', title: 'delayed.stl' }, { status: 201 }));
+
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/delayed.stl'));
+  expect(await screen.findByText('Upload completed, but could not remove the model.')).toBeInTheDocument();
+  expect(screen.getByText('delayed.stl')).toBeInTheDocument();
+});
+
+test('cleans up active uploads and skips queued uploads after unmount', async () => {
+  window.history.pushState({}, '', '/upload');
+  let releaseUpload: (response: Response) => void = () => undefined;
+  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const uploads: string[] = [];
+  const deleted: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      uploads.push(file.name);
+      return uploads.length === 1
+        ? uploadResponse
+        : Response.json({ ...model, id: file.name, title: file.name }, { status: 201 });
+    }
+    if (url.startsWith('/api/models/') && init?.method === 'DELETE') {
+      deleted.push(url);
+      return new Response(null, { status: 204 });
+    }
+    return Response.json({});
+  }));
+  const view = renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'active.stl'), new File(['b'], 'queued.stl')] } });
+  await waitFor(() => expect(uploads).toEqual(['active.stl']));
+  view.unmount();
+  releaseUpload(Response.json({ ...model, id: 'active.stl', title: 'active.stl' }, { status: 201 }));
+
+  await waitFor(() => expect(deleted).toEqual(['/api/models/active.stl']));
+  expect(uploads).toEqual(['active.stl']);
 });
 
 test('catalog exposes filters, sorting, pagination, and owner nav', async () => {
   const urls: string[] = [];
+  let refreshed = false;
+  let thumbnail: EventListener = () => undefined;
+  vi.stubGlobal('EventSource', class {
+    addEventListener(event: string, listener: EventListener) {
+      if (event === 'thumbnail') thumbnail = listener;
+    }
+    close = vi.fn();
+  });
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     urls.push(url);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/tags')) return Response.json([{ name: 'Tools', slug: 'tools' }]);
     if (url.includes('/api/collections')) return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
-    if (url.includes('/api/models')) return Response.json({ items: [model], nextCursor: url.includes('cursor=') ? '' : 'next-page' });
+    if (url.includes('/api/models')) {
+      const nextModel = { ...model, id: 'm2', title: 'Second Model', files: [{ ...model.files[0], id: 'f2', modelId: 'm2' }] };
+      if (url.includes('cursor=')) return Response.json({ items: refreshed ? [] : [nextModel], nextCursor: '' });
+      return Response.json({ items: [{ ...model, title: refreshed ? 'Calibration Cube Updated' : model.title }], nextCursor: 'next-page' });
+    }
     return Response.json({});
   }));
   renderApp();
   expect(await screen.findByText('Calibration Cube')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Models' })).toBeInTheDocument();
+  expect(screen.getByText('1 model shown')).toBeInTheDocument();
+  expect(screen.getByText('STL')).toBeInTheDocument();
+  expect(screen.getByText(/12 tris/i)).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /upload/i })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Search models'), { target: { value: 'cube' } });
   fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'tools' } });
@@ -67,7 +259,68 @@ test('catalog exposes filters, sorting, pagination, and owner nav', async () => 
   fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'title' } });
   await waitFor(() => expect(urls.some((u) => u.includes('q=cube') && u.includes('tag=tools') && u.includes('collection=fixtures') && u.includes('sort=title'))).toBe(true));
   fireEvent.click(screen.getByRole('button', { name: /load more/i }));
-  await waitFor(() => expect(urls.some((u) => u.includes('cursor=next-page'))).toBe(true));
+  expect(await screen.findByText('Second Model')).toBeInTheDocument();
+  refreshed = true;
+  thumbnail(new Event('thumbnail'));
+  expect(await screen.findByText('Calibration Cube Updated')).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('link', { name: /second model/i })).not.toBeInTheDocument());
+});
+
+test('polishes empty collections and settings with active navigation and grouped states', async () => {
+  window.history.pushState({}, '', '/collections');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/collections') && init?.method === 'POST') return Response.json({ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }, { status: 201 });
+    if (url.includes('/api/collections')) return Response.json([]);
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 2048 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByRole('heading', { name: 'Collections' })).toBeInTheDocument();
+  expect(await screen.findByText('No collections yet')).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /collections/i })).toHaveAttribute('aria-current', 'page');
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Fixtures' } });
+  fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Useful parts' } });
+  fireEvent.click(screen.getByRole('button', { name: /create collection/i }));
+  await waitFor(() => expect(screen.getByLabelText('Name')).toHaveValue(''));
+
+  window.history.pushState({}, '', '/settings');
+  fireEvent(window, new Event('fileament:navigate'));
+  expect(await screen.findByRole('heading', { name: 'Security' })).toBeInTheDocument();
+  expect(await screen.findByText('2.0 KB')).toBeInTheDocument();
+  expect(await screen.findByText('No share links yet')).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('aria-current', 'page');
+});
+
+test('reports a collections query failure instead of an empty state', async () => {
+  window.history.pushState({}, '', '/collections');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (String(input).includes('/api/collections')) return new Response('failed', { status: 500 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByText('Collections could not be loaded')).toBeInTheDocument();
+  expect(screen.queryByText('No collections yet')).not.toBeInTheDocument();
+});
+
+test('reports a share-links query failure instead of an empty state', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return new Response('failed', { status: 500 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByText('Share links could not be loaded')).toBeInTheDocument();
+  expect(screen.queryByText('No share links yet')).not.toBeInTheDocument();
 });
 
 test('detail management actions call owner APIs and preserve viewer gate', async () => {
@@ -137,5 +390,5 @@ test('public collection cards select models within the same share and use token 
 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
 }

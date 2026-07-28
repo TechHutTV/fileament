@@ -1,5 +1,5 @@
-import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, Download, Link2, Moon, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Box, Check, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 
@@ -40,6 +40,8 @@ type Page = { items: Model[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
+type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
+type UploadItem = { key: string; file: File; status: UploadStatus; model?: Model; error?: string };
 
 export function Root() {
   return <QueryClientProvider client={client}><App /></QueryClientProvider>;
@@ -65,16 +67,16 @@ function OwnerApp({ path }: { path: string }) {
   }, [dark]);
   const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   if (me.isLoading) return <Shell><Empty text="Loading" /></Shell>;
-  if (me.data?.setupRequired) return <AuthScreen mode="setup" />;
-  if (!me.data?.authenticated) return <AuthScreen mode="login" />;
+  if (me.data?.setupRequired) return <AuthScreen key="setup" mode="setup" />;
+  if (!me.data?.authenticated) return <AuthScreen key="login" mode="login" />;
   return (
     <Shell>
       <nav className="topbar">
         <a className="brand" href="/"><Box size={22} />Fileament</a>
         <div className="navlinks">
-          <a href="/upload"><Upload size={18} />Upload</a>
-          <a href="/collections">Collections</a>
-          <a href="/settings"><Settings size={18} />Settings</a>
+          <a className={path === '/upload' ? 'active' : undefined} aria-current={path === '/upload' ? 'page' : undefined} href="/upload"><Upload size={18} />Upload</a>
+          <a className={path.startsWith('/collections') ? 'active' : undefined} aria-current={path.startsWith('/collections') ? 'page' : undefined} href="/collections"><Folder size={18} />Collections</a>
+          <a className={path === '/settings' ? 'active' : undefined} aria-current={path === '/settings' ? 'page' : undefined} href="/settings"><Settings size={18} />Settings</a>
           <button type="button" className="icon" onClick={() => setDark(!dark)} title="Toggle dark mode" aria-label="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
         </div>
       </nav>
@@ -89,6 +91,7 @@ function Shell({ children }: { children: ReactNode }) {
 
 function AuthScreen({ mode }: { mode: 'setup' | 'login' }) {
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const qc = useQueryClient();
   const mutation = useMutation({
     mutationFn: () => api(mode === 'setup' ? '/api/auth/setup' : '/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -96,12 +99,21 @@ function AuthScreen({ mode }: { mode: 'setup' | 'login' }) {
   });
   return (
     <main className="auth">
-      <form onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}>
-        <h1>{mode === 'setup' ? 'Set owner password' : 'Owner login'}</h1>
-        <label>Password<input type="password" minLength={mode === 'setup' ? 12 : undefined} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus /></label>
-        <button type="submit">{mode === 'setup' ? 'Create owner' : 'Log in'}</button>
-        {mutation.isError && <p className="error">Authentication failed</p>}
-      </form>
+      <div className="auth-shell">
+        <a className="auth-brand" href="/"><span><Box size={25} /></span><strong>Fileament</strong></a>
+        <form className="auth-card" onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}>
+          <div className="auth-heading">
+            <span className="eyebrow">Private model library</span>
+            <h1>{mode === 'setup' ? 'Set owner password' : 'Owner login'}</h1>
+            <p>{mode === 'setup' ? 'Create the password that protects your library and private model files.' : 'Welcome back. Enter your owner password to access your library.'}</p>
+          </div>
+          <label>Password<div className="password-control"><input type={showPassword ? 'text' : 'password'} minLength={mode === 'setup' ? 12 : undefined} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus /><button type="button" className="icon" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? 'Hide password' : 'Show password'} title={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label>
+          {mode === 'setup' && <small className="field-help">Use at least 12 characters.</small>}
+          <button type="submit" disabled={mutation.isPending}>{mutation.isPending ? 'Please wait' : mode === 'setup' ? 'Create owner' : 'Log in'}</button>
+          {mutation.isError && <p className="error auth-error">Authentication failed. Check your password and try again.</p>}
+        </form>
+        <p className="auth-tagline">Your 3D files, organized.</p>
+      </div>
     </main>
   );
 }
@@ -111,55 +123,59 @@ function Catalog() {
   const [tag, setTag] = useState('');
   const [collection, setCollection] = useState('');
   const [sort, setSort] = useState('created');
-  const [cursor, setCursor] = useState('');
-  const [items, setItems] = useState<Model[]>([]);
   const debounced = useDebounced(q, 250);
   const qc = useQueryClient();
   const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const tags = useQuery<{ name: string; slug: string }[]>({ queryKey: ['tags'], queryFn: () => api('/api/tags') });
   const collectionItems = Array.isArray(collections.data) ? collections.data : [];
   const tagItems = Array.isArray(tags.data) ? tags.data : [];
-  const query = new URLSearchParams({ limit: '24', sort });
-  if (debounced) query.set('q', debounced);
-  if (tag) query.set('tag', tag);
-  if (collection) query.set('collection', collection);
-  if (cursor) query.set('cursor', cursor);
-  const page = useQuery<Page>({ queryKey: ['models', debounced, tag, collection, sort, cursor], queryFn: () => api(`/api/models?${query}`) });
-  useEffect(() => { setCursor(''); setItems([]); }, [debounced, tag, collection, sort]);
-  useEffect(() => {
-    if (!page.data) return;
-    setItems((prev) => cursor ? [...prev, ...page.data.items] : page.data.items);
-  }, [page.data, cursor]);
+  const page = useInfiniteQuery({
+    queryKey: ['models', debounced, tag, collection, sort],
+    initialPageParam: '',
+    queryFn: ({ pageParam }) => {
+      const query = new URLSearchParams({ limit: '24', sort });
+      if (debounced) query.set('q', debounced);
+      if (tag) query.set('tag', tag);
+      if (collection) query.set('collection', collection);
+      if (pageParam) query.set('cursor', pageParam);
+      return api(`/api/models?${query}`) as Promise<Page>;
+    },
+    getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
+  });
+  const items = [...new Map((page.data?.pages.flatMap((result) => result.items) ?? []).map((item) => [item.id, item])).values()];
   useEffect(() => {
     if (typeof EventSource === 'undefined') return undefined;
     const es = new EventSource('/api/events');
     es.addEventListener('thumbnail', () => qc.invalidateQueries({ queryKey: ['models'] }));
     return () => es.close();
   }, [qc]);
+  const hasFilters = q || tag || collection || sort !== 'created';
   return (
-    <section className="content">
-      <div className="toolbar multi">
+    <section className="content page-content">
+      <PageHeader eyebrow="Your library" title="Models" description={`${items.length} ${items.length === 1 ? 'model' : 'models'} shown`} action={<a className="button-link" href="/upload"><Plus size={17} />Add models</a>} />
+      <div className="toolbar multi catalog-toolbar">
         <label className="search"><Search size={18} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search models" aria-label="Search models" /></label>
-        <Select label="Tag" value={tag} onChange={setTag} options={[['', 'All tags'], ...tagItems.map((t) => [t.slug, t.name] as [string, string])]} />
-        <Select label="Collection" value={collection} onChange={setCollection} options={[['', 'All collections'], ...collectionItems.map((c) => [c.slug, c.name] as [string, string])]} />
-        <Select label="Sort" value={sort} onChange={setSort} options={[['created', 'Newest'], ['updated', 'Updated'], ['title', 'Title'], ['size', 'Size']]} />
+        <Select compact label="Tag" value={tag} onChange={setTag} options={[['', 'All tags'], ...tagItems.map((t) => [t.slug, t.name] as [string, string])]} />
+        <Select compact label="Collection" value={collection} onChange={setCollection} options={[['', 'All collections'], ...collectionItems.map((c) => [c.slug, c.name] as [string, string])]} />
+        <Select compact label="Sort" value={sort} onChange={setSort} options={[['created', 'Newest'], ['updated', 'Updated'], ['title', 'Title'], ['size', 'Size']]} />
+        {hasFilters && <button type="button" className="clear-filters" onClick={() => { setQ(''); setTag(''); setCollection(''); setSort('created'); }}><X size={16} />Clear</button>}
       </div>
       {page.isError && <Empty text="Catalog could not be loaded" />}
       {page.isLoading && items.length === 0 && <Empty text="Loading catalog" />}
       {!page.isLoading && items.length === 0 && <Empty text="No models found" />}
       <div className="grid">{items.map((model) => <ModelCard key={model.id} model={model} />)}</div>
-      {page.data?.nextCursor && <button type="button" className="load" onClick={() => setCursor(page.data.nextCursor)}>Load more</button>}
+      {page.hasNextPage && <button type="button" className="load" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more'}</button>}
     </section>
   );
 }
 
 function ModelCard({ model }: { model: Model }) {
   const src = model.primaryThumb ? `/thumbs/${model.id}/${model.primaryThumb}` : '';
+  const file = model.files[0];
   return (
     <a className="card" href={`/models/${model.id}`}>
-      <div className="thumb">{src ? <LazyImage src={src} alt={`${model.title} thumbnail`} /> : <Box size={42} aria-hidden />}</div>
-      <h2>{model.title}</h2>
-      <p>{formatBytes(model.totalBytes)}</p>
+      <div className="thumb">{src ? <LazyImage src={src} alt={`${model.title} thumbnail`} /> : <Box size={42} aria-hidden />}{file && <span className="card-format">{file.format.toUpperCase()}</span>}</div>
+      <div className="card-body"><h2>{model.title}</h2><p className="card-meta"><span>{formatBytes(model.totalBytes)}</span>{file && <span>{file.triangleCount.toLocaleString()} tris</span>}</p></div>
     </a>
   );
 }
@@ -195,7 +211,7 @@ function Detail({ id }: { id: string }) {
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Files</h2>
         <Select label="Viewer file" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />
-        {model.files.map((f) => <div className="file" key={f.id}><a href={`/files/${model.id}/${f.id}`}><Download size={16} />{f.filename}</a><small>{f.triangleCount} tris · {dims(f)} · {formatBytes(f.sizeBytes)}</small><button type="button" className="icon" title="Use thumbnail" onClick={() => setThumb.mutate(f.id)}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" onClick={() => deleteFile.mutate(f.id)}><Trash2 size={16} /></button></div>)}
+        {model.files.map((f) => <div className="file model-file" key={f.id}><div className="model-file-copy"><a href={`/files/${model.id}/${f.id}`}><Download size={16} /><span>{f.filename}</span></a><small>{f.triangleCount} tris · {dims(f)} · {formatBytes(f.sizeBytes)}</small></div><div className="model-file-actions"><button type="button" className="icon" title="Use thumbnail" onClick={() => setThumb.mutate(f.id)}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" onClick={() => deleteFile.mutate(f.id)}><Trash2 size={16} /></button></div></div>)}
         <UploadInline label="Add files or ZIP" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
         <div className="images">{model.images?.map((img) => <figure key={img.id}><img src={`/images/${model.id}/${img.id}`} alt={`${model.title} image`} /><button type="button" className="icon danger" onClick={() => deleteImage.mutate(img.id)}><X size={16} /></button></figure>)}</div>
@@ -232,26 +248,193 @@ function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<M
 }
 
 function UploadPage() {
-  const [done, setDone] = useState('');
-  return <section className="content narrow"><UploadInline label="Upload model or ZIP bundle" path="/api/models" onDone={(m) => setDone((m as Model).id)} />{done && <a className="file" href={`/models/${done}`}>Open uploaded model</a>}</section>;
+  const qc = useQueryClient();
+  const [items, setItems] = useState<UploadItem[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const sequence = useRef(0);
+  const input = useRef<HTMLInputElement>(null);
+  const pending = useRef(new Set<string>());
+  const cancelled = useRef(new Set<string>());
+  const uploadChain = useRef<Promise<void>>(Promise.resolve());
+
+  const updateItem = (key: string, update: Partial<UploadItem>) => {
+    setItems((current) => current.map((item) => item.key === key ? { ...item, ...update } : item));
+  };
+
+  const uploadItem = async (item: UploadItem) => {
+    updateItem(item.key, { status: 'uploading' });
+    const body = new FormData();
+    body.append('file', item.file);
+    try {
+      const model = await api('/api/models', { method: 'POST', body }) as Model;
+      if (cancelled.current.has(item.key)) {
+        try {
+          await api(`/api/models/${model.id}`, { method: 'DELETE' });
+        } catch {
+          const failed = { ...item, model, status: 'error' as const, error: 'Upload completed, but could not remove the model.' };
+          setItems((current) => current.some((candidate) => candidate.key === item.key)
+            ? current.map((candidate) => candidate.key === item.key ? failed : candidate)
+            : [...current, failed]);
+          qc.invalidateQueries({ queryKey: ['models'] });
+          qc.invalidateQueries({ queryKey: ['storage'] });
+        }
+        return;
+      }
+      updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing' });
+      if (!model.primaryThumb) {
+        try {
+          const refreshed = await api(`/api/models/${model.id}`) as Model;
+          if (refreshed.primaryThumb) updateItem(item.key, { model: refreshed, status: 'ready' });
+        } catch {
+          // Thumbnail events continue to reconcile uploads if this refresh races rendering.
+        }
+      }
+      qc.invalidateQueries({ queryKey: ['models'] });
+      qc.invalidateQueries({ queryKey: ['storage'] });
+    } catch {
+      if (!cancelled.current.has(item.key)) {
+        updateItem(item.key, { status: 'error', error: 'Upload failed. Remove it and try again.' });
+      }
+    } finally {
+      pending.current.delete(item.key);
+      cancelled.current.delete(item.key);
+    }
+  };
+
+  const addFiles = (files: FileList | File[]) => {
+    const queued = Array.from(files).map((file) => ({ key: `upload-${++sequence.current}`, file, status: 'queued' as const }));
+    if (queued.length === 0) return;
+    queued.forEach((item) => pending.current.add(item.key));
+    setItems((current) => [...current, ...queued]);
+    queued.forEach((item) => {
+      uploadChain.current = uploadChain.current.then(async () => {
+        if (cancelled.current.has(item.key)) {
+          pending.current.delete(item.key);
+          cancelled.current.delete(item.key);
+          return;
+        }
+        await uploadItem(item);
+      });
+    });
+  };
+
+  const removeItem = async (item: UploadItem) => {
+    cancelled.current.add(item.key);
+    if (!item.model) {
+      setItems((current) => current.filter((candidate) => candidate.key !== item.key));
+      return;
+    }
+    updateItem(item.key, { status: 'removing' });
+    try {
+      await api(`/api/models/${item.model.id}`, { method: 'DELETE' });
+      setItems((current) => current.filter((candidate) => candidate.key !== item.key));
+      qc.invalidateQueries({ queryKey: ['models'] });
+      qc.invalidateQueries({ queryKey: ['storage'] });
+    } catch {
+      updateItem(item.key, { status: 'error', error: 'Could not remove this model.' });
+    } finally {
+      cancelled.current.delete(item.key);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return undefined;
+    const events = new EventSource('/api/events');
+    events.addEventListener('thumbnail', (event) => {
+      const modelID = JSON.parse((event as MessageEvent).data).modelId as string;
+      void api(`/api/models/${modelID}`).then((model: Model) => {
+        setItems((current) => current.map((item) => item.model?.id === modelID ? { ...item, model, status: model.primaryThumb ? 'ready' : 'processing' } : item));
+      }).catch(() => undefined);
+    });
+    return () => events.close();
+  }, []);
+
+  useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
+
+  const active = items.some((item) => item.status === 'queued' || item.status === 'uploading' || item.status === 'removing');
+  const completed = items.filter((item) => item.status === 'ready' || item.status === 'processing').length;
+  return <section className="upload-page">
+    <header className="upload-header">
+      <span className="eyebrow">Add models</span>
+      <h1>Build your library</h1>
+      <p>Drop individual models or ZIP bundles. Each file uploads automatically and becomes its own catalog entry.</p>
+    </header>
+    <div
+      className={`upload-dropzone${dragging ? ' dragging' : ''}`}
+      role="button"
+      tabIndex={0}
+      aria-label="Drop 3D files or choose files"
+      onClick={() => input.current?.click()}
+      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); input.current?.click(); } }}
+      onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }}
+      onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}
+    >
+      <input ref={input} className="visually-hidden" type="file" multiple accept=".stl,.obj,.3mf,.zip" aria-label="Choose 3D files" onChange={(event) => { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }} />
+      <span className="dropzone-icon"><Upload size={28} /></span>
+      <strong>{dragging ? 'Drop to start uploading' : 'Drop 3D files here'}</strong>
+      <span>or click to browse your files</span>
+      <small>STL, OBJ, 3MF, and ZIP bundles</small>
+    </div>
+    {items.length > 0 && <section className="upload-queue" aria-live="polite">
+      <div className="queue-heading"><div><span className="eyebrow">Upload queue</span><h2>{items.length} {items.length === 1 ? 'model' : 'models'}</h2></div><span>{completed} uploaded</span></div>
+      <div className="upload-grid">{items.map((item) => {
+        const thumbnail = item.model?.primaryThumb ? `/thumbs/${item.model.id}/${item.model.primaryThumb}` : '';
+        const label = item.status === 'queued' ? 'Queued' : item.status === 'uploading' ? 'Uploading' : item.status === 'processing' ? 'Generating preview' : item.status === 'ready' ? 'Ready' : item.status === 'removing' ? 'Removing' : 'Needs attention';
+        const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
+        return <article className={`upload-card ${item.status}`} key={item.key}>
+          <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${item.file.name} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
+          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${item.file.name}${item.model ? '' : ' upload'}`} onClick={() => { void removeItem(item); }} disabled={item.status === 'removing'}><X size={17} /></button>
+          <div className="upload-card-body"><div><h3>{item.model?.title || item.file.name}</h3><p>{item.file.name} · {formatBytes(item.file.size)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
+        </article>;
+      })}</div>
+    </section>}
+    {items.length > 0 && <footer className="upload-finish"><div><strong>{active ? 'Uploads in progress' : `${completed} ${completed === 1 ? 'model' : 'models'} added`}</strong><span>{active ? 'You can keep adding files while these finish.' : 'Everything is saved to your library.'}</span></div><button type="button" disabled={active} onClick={() => navigate('/')}><Check size={18} />Finish and view library</button></footer>}
+  </section>;
 }
 
 function SettingsPage() {
   const qc = useQueryClient();
   const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
-  const { data: shares } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
+  const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const revoke = useMutation({ mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); } });
-  return <section className="content narrow"><h1>Settings</h1><p>Storage: {formatBytes(data?.totalBytes ?? 0)}</p><form className="stack" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><button type="submit">Change password</button>{change.isError && <p className="error">Password change failed</p>}</form><h2>Share links</h2>{shares?.map((s) => <div className="file" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small><button type="button" className="icon danger" onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button></div>)}</section>;
+  return <section className="content narrow settings-page">
+    <PageHeader eyebrow="Owner controls" title="Settings" description="Manage storage, account security, and public access to your library." />
+    <div className="storage-card"><span className="surface-icon"><HardDrive size={20} /></span><div><span>Library storage</span><strong>{formatBytes(data?.totalBytes ?? 0)}</strong></div></div>
+    <section className="surface-card settings-card">
+      <SectionHeading icon={<Lock size={19} />} title="Security" description="Update the password used to access this private library." />
+      <form className="stack settings-form" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><small className="field-help">Use at least 12 characters.</small><button type="submit" disabled={change.isPending}>{change.isPending ? 'Updating password' : 'Change password'}</button>{change.isError && <p className="error">Password change failed</p>}{change.isSuccess && <p className="success">Password updated.</p>}</form>
+    </section>
+    <section className="surface-card settings-card">
+      <SectionHeading icon={<Link2 size={19} />} title="Share links" description="Review and revoke public links created for models and collections." />
+      {sharesError && <Empty text="Share links could not be loaded" />}
+      {sharesLoading && <Empty text="Loading share links" />}
+      {!sharesLoading && !sharesError && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
+      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small><button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button></div>)}
+    </section>
+  </section>;
 }
 
 function CollectionsPage() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
-  const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['collections'] }) });
-  return <section className="content"><CollectionForm onSave={(body) => create.mutate(body)} />{isLoading && <Empty text="Loading collections" />}<div className="grid">{(data ?? []).map((c) => <a className="card" href={`/collections/${c.slug}`} key={c.id}><div className="thumb"><Box size={42} aria-hidden /></div><h2>{c.name}</h2><p>{c.description}</p></a>)}</div></section>;
+  const [formVersion, setFormVersion] = useState(0);
+  const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
+  const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { setFormVersion((version) => version + 1); qc.invalidateQueries({ queryKey: ['collections'] }); } });
+  return <section className="content page-content collections-page">
+    <PageHeader eyebrow="Organize your library" title="Collections" description="Group related models into focused sets for projects, printers, or workflows." />
+    <section className="surface-card collection-create">
+      <SectionHeading icon={<Folder size={19} />} title="Create a collection" description="Start a new group and add models from their detail pages." />
+      <CollectionForm key={formVersion} onSave={(body) => create.mutate(body)} />
+    </section>
+    {isError && <Empty text="Collections could not be loaded" />}
+    {isLoading && <Empty text="Loading collections" />}
+    {!isLoading && !isError && (data?.length ?? 0) === 0 && <EmptyState icon={<Folder size={28} />} title="No collections yet" text="Create your first collection above, then add models from your library." />}
+    <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelIds?.length ?? c.models?.length ?? 0; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className="collection-cover"><Folder size={34} aria-hidden /><span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
+  </section>;
 }
 
 function CollectionDetail({ slug }: { slug: string }) {
@@ -322,8 +505,9 @@ function ShareRow({ share }: { share: Share }) {
 
 function UploadInline({ label, path, onDone }: { label: string; path: string; onDone: (value: unknown) => void }) {
   const [file, setFile] = useState<File | null>(null);
-  const mutation = useMutation({ mutationFn: async () => { if (!file) return null; const fd = new FormData(); fd.append('file', file); return api(path, { method: 'POST', body: fd }); }, onSuccess: (value) => { setFile(null); onDone(value); } });
-  return <form className="upload" onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}><label>{label}<input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></label><button type="submit"><Upload size={18} />Upload</button>{mutation.isError && <p className="error">Upload failed</p>}</form>;
+  const input = useRef<HTMLInputElement>(null);
+  const mutation = useMutation({ mutationFn: async () => { if (!file) return null; const fd = new FormData(); fd.append('file', file); return api(path, { method: 'POST', body: fd }); }, onSuccess: (value) => { setFile(null); if (input.current) input.current.value = ''; onDone(value); } });
+  return <form className="upload compact-upload" onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}><label className="compact-picker"><input ref={input} className="visually-hidden" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /><span><Plus size={16} /><span title={file?.name}>{file?.name || label}</span></span></label><button type="submit" disabled={!file || mutation.isPending}><Upload size={17} />{mutation.isPending ? 'Uploading' : 'Upload'}</button>{mutation.isError && <p className="error">Upload failed</p>}</form>;
 }
 
 function LazyImage({ src, alt }: { src: string; alt: string }) {
@@ -343,8 +527,20 @@ function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown>{text}</ReactMarkdown></div>;
 }
 
-function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
-  return <label className="select">{label}<select value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v, text]) => <option value={v} key={v}>{text}</option>)}</select></label>;
+function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) {
+  return <header className="page-header"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</header>;
+}
+
+function SectionHeading({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
+  return <header className="section-heading"><span className="surface-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header>;
+}
+
+function EmptyState({ icon, title, text, compact = false }: { icon: ReactNode; title: string; text: string; compact?: boolean }) {
+  return <div className={`empty-state${compact ? ' compact' : ''}`}><span className="empty-state-icon">{icon}</span><h2>{title}</h2><p>{text}</p></div>;
+}
+
+function Select({ label, value, onChange, options, compact = false }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][]; compact?: boolean }) {
+  return <label className={`select${compact ? ' compact-select' : ''}`}><span className={compact ? 'visually-hidden' : undefined}>{label}</span><select aria-label={compact ? label : undefined} value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v, text]) => <option value={v} key={v}>{text}</option>)}</select></label>;
 }
 
 function Empty({ text }: { text: string }) {

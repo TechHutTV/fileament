@@ -3,7 +3,7 @@ package render
 import (
 	"image"
 	"image/color"
-	"image/jpeg"
+	"image/png"
 	"math"
 	"os"
 
@@ -14,41 +14,56 @@ type point struct {
 	x, y, z float64
 }
 
-func RenderJPEG(tris []mesh.Triangle, path string, size int) error {
+func RenderPNG(tris []mesh.Triangle, path string, size int) error {
 	if size <= 0 {
 		size = 512
 	}
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	bg := color.RGBA{R: 246, G: 246, B: 242, A: 255}
-	for i := range img.Pix {
-		if i%4 == 0 {
-			img.Pix[i] = bg.R
-			img.Pix[i+1] = bg.G
-			img.Pix[i+2] = bg.B
-			img.Pix[i+3] = 255
-		}
-	}
 	if len(tris) == 0 {
-		return encode(path, img)
+		return encodePNG(path, img)
 	}
+	drawShadow(img)
 	center, scale := bounds(tris)
 	zbuf := make([]float64, size*size)
 	for i := range zbuf {
 		zbuf[i] = math.Inf(-1)
 	}
+	key := normalize(point{x: -0.45, y: -0.55, z: 1})
+	fill := normalize(point{x: 0.7, y: 0.1, z: 0.65})
 	for _, tri := range tris {
-		a := project(norm(tri.A, center, scale), size)
-		b := project(norm(tri.B, center, scale), size)
-		c := project(norm(tri.C, center, scale), size)
-		n := normal(a, b, c)
+		av := view(norm(tri.A, center, scale))
+		bv := view(norm(tri.B, center, scale))
+		cv := view(norm(tri.C, center, scale))
+		n := normal(av, bv, cv)
 		if n.z <= 0 {
 			continue
 		}
-		light := normalize(point{x: -0.4, y: -0.5, z: 1})
-		shade := 0.25 + 0.75*math.Max(0, dot(normalize(n), light))
-		fillTriangle(img, zbuf, a, b, c, shade)
+		n = normalize(n)
+		shade := 0.2 + 0.58*math.Max(0, dot(n, key)) + 0.18*math.Max(0, dot(n, fill)) + 0.08*math.Pow(1-math.Abs(n.z), 2)
+		fillTriangle(img, zbuf, project(av, size), project(bv, size), project(cv, size), math.Min(1, shade))
 	}
-	return encode(path, img)
+	return encodePNG(path, img)
+}
+
+func drawShadow(img *image.RGBA) {
+	cx, cy := float64(img.Bounds().Dx())*0.5, float64(img.Bounds().Dy())*0.73
+	rx, ry := float64(img.Bounds().Dx())*0.3, float64(img.Bounds().Dy())*0.065
+	for y := int(cy - ry); y <= int(cy+ry); y++ {
+		for x := int(cx - rx); x <= int(cx+rx); x++ {
+			dx, dy := (float64(x)-cx)/rx, (float64(y)-cy)/ry
+			q := dx*dx + dy*dy
+			if q >= 1 {
+				continue
+			}
+			alpha := 0.12 * math.Pow(1-q, 2)
+			img.Set(x, y, color.NRGBA{
+				R: 42,
+				G: 57,
+				B: 51,
+				A: uint8(alpha * 255),
+			})
+		}
+	}
 }
 
 func bounds(tris []mesh.Triangle) (mesh.Vec3, float64) {
@@ -75,16 +90,20 @@ func norm(v, c mesh.Vec3, s float64) mesh.Vec3 {
 	return mesh.Vec3{X: (v.X - c.X) * s, Y: (v.Y - c.Y) * s, Z: (v.Z - c.Z) * s}
 }
 
-func project(v mesh.Vec3, size int) point {
+func view(v mesh.Vec3) point {
 	az := math.Pi / 4
 	el := math.Pi / 6
 	x := v.X*math.Cos(az) - v.Y*math.Sin(az)
 	y0 := v.X*math.Sin(az) + v.Y*math.Cos(az)
 	y := y0*math.Sin(el) - v.Z*math.Cos(el)
 	z := y0*math.Cos(el) + v.Z*math.Sin(el)
-	margin := float64(size) * 0.18
+	return point{x: x, y: y, z: z}
+}
+
+func project(v point, size int) point {
+	margin := float64(size) * 0.14
 	scale := float64(size)/2 - margin
-	return point{x: float64(size)/2 + x*scale, y: float64(size)/2 + y*scale, z: z}
+	return point{x: float64(size)/2 + v.x*scale, y: float64(size)/2 + v.y*scale, z: v.z}
 }
 
 func fillTriangle(img *image.RGBA, zbuf []float64, a, b, c point, shade float64) {
@@ -96,8 +115,12 @@ func fillTriangle(img *image.RGBA, zbuf []float64, a, b, c point, shade float64)
 	if den == 0 {
 		return
 	}
-	level := uint8(90 + 130*shade)
-	col := color.RGBA{R: level, G: level, B: level, A: 255}
+	col := color.RGBA{
+		R: uint8(24 + 75*shade),
+		G: uint8(64 + 110*shade),
+		B: uint8(55 + 95*shade),
+		A: 255,
+	}
 	for y := minY; y <= maxY; y++ {
 		for x := minX; x <= maxX; x++ {
 			px, py := float64(x)+0.5, float64(y)+0.5
@@ -135,11 +158,11 @@ func dot(a, b point) float64 {
 	return a.x*b.x + a.y*b.y + a.z*b.z
 }
 
-func encode(path string, img image.Image) error {
+func encodePNG(path string, img image.Image) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return jpeg.Encode(f, img, &jpeg.Options{Quality: 85})
+	return png.Encode(f, img)
 }

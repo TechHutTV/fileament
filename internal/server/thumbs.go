@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,9 +13,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TechHutTV/fileament/internal/ids"
 	"github.com/TechHutTV/fileament/internal/mesh"
 	"github.com/TechHutTV/fileament/internal/render"
 	"github.com/go-chi/chi/v5"
+)
+
+const (
+	thumbnailRenderVersionKey = "thumbnail_render_version"
+	thumbnailRenderVersion    = "3"
 )
 
 type ThumbnailEvent struct {
@@ -43,6 +50,55 @@ func (a *App) startWorkers() {
 			}
 		}()
 	}
+}
+
+func (a *App) refreshThumbnailRenderVersion() error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key = ?`, thumbnailRenderVersionKey).Scan(&current)
+	if err == nil && current == thumbnailRenderVersion {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id FROM files ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	var fileIDs []string
+	for rows.Next() {
+		var fileID string
+		if err := rows.Scan(&fileID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		fileIDs = append(fileIDs, fileID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM jobs WHERE type = 'thumbnail'`); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for _, fileID := range fileIDs {
+		if _, err := tx.Exec(`INSERT INTO jobs(id,type,file_id,status,created_at) VALUES(?, 'thumbnail', ?, 'pending', ?)`, ids.New(), fileID, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, thumbnailRenderVersionKey, thumbnailRenderVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *App) mountThumbRoutes(r chi.Router) {
@@ -99,17 +155,19 @@ func (a *App) processNextThumbnail() (err error) {
 	if err != nil {
 		return err
 	}
-	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".jpg"))
+	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))
 	thumbPath := filepath.Join(a.cfg.DataDir, "models", modelID, thumbRel)
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
 		return err
 	}
-	if err := render.RenderJPEG(tris, thumbPath, 512); err != nil {
+	if err := render.RenderPNG(tris, thumbPath, 512); err != nil {
 		return err
 	}
 	if _, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID); err != nil {
 		return err
 	}
+	a.thumbMu.Lock()
+	defer a.thumbMu.Unlock()
 	var primary, largestFileID string
 	if err := a.db.QueryRow(`SELECT COALESCE(primary_thumb, '') FROM models WHERE id = ?`, modelID).Scan(&primary); err != nil {
 		return err
@@ -117,12 +175,15 @@ func (a *App) processNextThumbnail() (err error) {
 	if err := a.db.QueryRow(`SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
 		return err
 	}
-	if primary == "" && fileID == largestFileID {
-		cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.jpg")
+	legacyFilePath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", fileID+".jpg")
+	legacyCardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.jpg")
+	migratesLegacyPrimary := primary == "card.jpg" && filesHaveEqualContents(legacyFilePath, legacyCardPath)
+	if (fileID == largestFileID && primary == "") || migratesLegacyPrimary {
+		cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.png")
 		if err := copyFile(cardPath, thumbPath); err != nil {
 			return err
 		}
-		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.jpg' WHERE id = ? AND (primary_thumb IS NULL OR primary_thumb = '')`, modelID); err != nil {
+		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {
 			return err
 		}
 	}
@@ -136,9 +197,22 @@ func (a *App) processNextThumbnail() (err error) {
 	if _, err := a.db.Exec(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ?`, jobID); err != nil {
 		return err
 	}
+	_ = os.Remove(legacyFilePath)
+	if migratesLegacyPrimary || primary == "card.png" {
+		_ = os.Remove(legacyCardPath)
+	}
 	claimed = false
 	a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: thumbRel})
 	return nil
+}
+
+func filesHaveEqualContents(left, right string) bool {
+	leftData, err := os.ReadFile(left)
+	if err != nil {
+		return false
+	}
+	rightData, err := os.ReadFile(right)
+	return err == nil && bytes.Equal(leftData, rightData)
 }
 
 func copyFile(dst, src string) error {
