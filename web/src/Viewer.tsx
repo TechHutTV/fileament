@@ -1,4 +1,4 @@
-import { Bounds, Edges, OrbitControls, Stage } from '@react-three/drei';
+import { Bounds, Edges, OrbitControls } from '@react-three/drei';
 import { Canvas, useLoader } from '@react-three/fiber';
 import { Suspense, useEffect, useMemo } from 'react';
 import { Mesh, MeshStandardMaterial, type Object3D } from 'three';
@@ -21,11 +21,9 @@ export default function ModelViewer({ file, url }: { file: ModelFile; url: strin
         <directionalLight color="#c8eee3" intensity={0.55} position={[-4, 2, -3]} />
         <Suspense fallback={null}>
           <Bounds fit clip observe margin={1.25}>
-            <Stage adjustCamera={false} environment="city" intensity={0.75} preset="rembrandt" shadows={{ type: 'contact', opacity: 0.3, blur: 2.5 }}>
-              <group rotation={[-Math.PI / 2, 0, 0]}>
-                <Loaded file={file} url={url} />
-              </group>
-            </Stage>
+            <group rotation={[-Math.PI / 2, 0, 0]}>
+              <Loaded file={file} url={url} />
+            </group>
           </Bounds>
         </Suspense>
         <OrbitControls makeDefault enableDamping dampingFactor={0.08} minPolarAngle={0.12} maxPolarAngle={Math.PI / 2.05} />

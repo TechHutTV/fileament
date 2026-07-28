@@ -41,12 +41,14 @@ test('accepts an empty setup success response and transitions to login', async (
   renderApp();
   expect(await screen.findByText('Set owner password')).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse password' } });
+  fireEvent.click(screen.getByRole('button', { name: /show password/i }));
+  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'text');
   fireEvent.click(screen.getByRole('button', { name: /create owner/i }));
   await waitFor(() => expect(calls).toContain('POST /api/auth/setup'));
   expect(await screen.findByText('Owner login')).toBeInTheDocument();
   expect(screen.getByText('Your 3D files, organized.')).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: /show password/i }));
-  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'text');
+  expect(screen.getByLabelText('Password')).toHaveValue('');
+  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'password');
   expect(screen.queryByText('Authentication failed')).not.toBeInTheDocument();
 });
 
@@ -121,6 +123,39 @@ test('serializes automatic uploads to avoid concurrent database writes', async (
   await waitFor(() => expect(uploads).toEqual(['first.stl', 'second.stl']));
 });
 
+test('reconciles a thumbnail event that arrives before the upload response', async () => {
+  window.history.pushState({}, '', '/upload');
+  let thumbnail: EventListener = () => undefined;
+  vi.stubGlobal('EventSource', class {
+    addEventListener(event: string, listener: EventListener) {
+      if (event === 'thumbnail') thumbnail = listener;
+    }
+    close = vi.fn();
+  });
+  let releaseUpload: (response: Response) => void = () => undefined;
+  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') return uploadResponse;
+    if (url === '/api/models/race.stl') return Response.json({ ...model, id: 'race.stl', title: 'race.stl', primaryThumb: 'card.png' });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
+  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['race'], 'race.stl')] } });
+  await screen.findByText('Uploading');
+  thumbnail(new MessageEvent('thumbnail', { data: JSON.stringify({ modelId: 'race.stl' }) }));
+  await waitFor(() => expect(calls).toContain('GET /api/models/race.stl'));
+  releaseUpload(Response.json({ ...model, id: 'race.stl', title: 'race.stl', primaryThumb: undefined }, { status: 201 }));
+
+  expect(await screen.findByAltText('race.stl thumbnail')).toHaveAttribute('src', '/thumbs/race.stl/card.png');
+  expect(calls.filter((call) => call === 'GET /api/models/race.stl')).toHaveLength(2);
+});
+
 test('keeps a cancelled upload visible when server cleanup fails', async () => {
   window.history.pushState({}, '', '/upload');
   let releaseUpload: (response: Response) => void = () => undefined;
@@ -190,13 +225,25 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
 
 test('catalog exposes filters, sorting, pagination, and owner nav', async () => {
   const urls: string[] = [];
+  let refreshed = false;
+  let thumbnail: EventListener = () => undefined;
+  vi.stubGlobal('EventSource', class {
+    addEventListener(event: string, listener: EventListener) {
+      if (event === 'thumbnail') thumbnail = listener;
+    }
+    close = vi.fn();
+  });
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     urls.push(url);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/tags')) return Response.json([{ name: 'Tools', slug: 'tools' }]);
     if (url.includes('/api/collections')) return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
-    if (url.includes('/api/models')) return Response.json({ items: [model], nextCursor: url.includes('cursor=') ? '' : 'next-page' });
+    if (url.includes('/api/models')) {
+      const nextModel = { ...model, id: 'm2', title: 'Second Model', files: [{ ...model.files[0], id: 'f2', modelId: 'm2' }] };
+      if (url.includes('cursor=')) return Response.json({ items: refreshed ? [] : [nextModel], nextCursor: '' });
+      return Response.json({ items: [{ ...model, title: refreshed ? 'Calibration Cube Updated' : model.title }], nextCursor: 'next-page' });
+    }
     return Response.json({});
   }));
   renderApp();
@@ -212,7 +259,11 @@ test('catalog exposes filters, sorting, pagination, and owner nav', async () => 
   fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'title' } });
   await waitFor(() => expect(urls.some((u) => u.includes('q=cube') && u.includes('tag=tools') && u.includes('collection=fixtures') && u.includes('sort=title'))).toBe(true));
   fireEvent.click(screen.getByRole('button', { name: /load more/i }));
-  await waitFor(() => expect(urls.some((u) => u.includes('cursor=next-page'))).toBe(true));
+  expect(await screen.findByText('Second Model')).toBeInTheDocument();
+  refreshed = true;
+  thumbnail(new Event('thumbnail'));
+  expect(await screen.findByText('Calibration Cube Updated')).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('link', { name: /second model/i })).not.toBeInTheDocument());
 });
 
 test('polishes empty collections and settings with active navigation and grouped states', async () => {

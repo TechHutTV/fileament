@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -67,8 +67,8 @@ function OwnerApp({ path }: { path: string }) {
   }, [dark]);
   const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   if (me.isLoading) return <Shell><Empty text="Loading" /></Shell>;
-  if (me.data?.setupRequired) return <AuthScreen mode="setup" />;
-  if (!me.data?.authenticated) return <AuthScreen mode="login" />;
+  if (me.data?.setupRequired) return <AuthScreen key="setup" mode="setup" />;
+  if (!me.data?.authenticated) return <AuthScreen key="login" mode="login" />;
   return (
     <Shell>
       <nav className="topbar">
@@ -123,25 +123,26 @@ function Catalog() {
   const [tag, setTag] = useState('');
   const [collection, setCollection] = useState('');
   const [sort, setSort] = useState('created');
-  const [cursor, setCursor] = useState('');
-  const [items, setItems] = useState<Model[]>([]);
   const debounced = useDebounced(q, 250);
   const qc = useQueryClient();
   const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const tags = useQuery<{ name: string; slug: string }[]>({ queryKey: ['tags'], queryFn: () => api('/api/tags') });
   const collectionItems = Array.isArray(collections.data) ? collections.data : [];
   const tagItems = Array.isArray(tags.data) ? tags.data : [];
-  const query = new URLSearchParams({ limit: '24', sort });
-  if (debounced) query.set('q', debounced);
-  if (tag) query.set('tag', tag);
-  if (collection) query.set('collection', collection);
-  if (cursor) query.set('cursor', cursor);
-  const page = useQuery<Page>({ queryKey: ['models', debounced, tag, collection, sort, cursor], queryFn: () => api(`/api/models?${query}`) });
-  useEffect(() => { setCursor(''); setItems([]); }, [debounced, tag, collection, sort]);
-  useEffect(() => {
-    if (!page.data) return;
-    setItems((prev) => cursor ? [...prev, ...page.data.items] : page.data.items);
-  }, [page.data, cursor]);
+  const page = useInfiniteQuery({
+    queryKey: ['models', debounced, tag, collection, sort],
+    initialPageParam: '',
+    queryFn: ({ pageParam }) => {
+      const query = new URLSearchParams({ limit: '24', sort });
+      if (debounced) query.set('q', debounced);
+      if (tag) query.set('tag', tag);
+      if (collection) query.set('collection', collection);
+      if (pageParam) query.set('cursor', pageParam);
+      return api(`/api/models?${query}`) as Promise<Page>;
+    },
+    getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
+  });
+  const items = [...new Map((page.data?.pages.flatMap((result) => result.items) ?? []).map((item) => [item.id, item])).values()];
   useEffect(() => {
     if (typeof EventSource === 'undefined') return undefined;
     const es = new EventSource('/api/events');
@@ -163,7 +164,7 @@ function Catalog() {
       {page.isLoading && items.length === 0 && <Empty text="Loading catalog" />}
       {!page.isLoading && items.length === 0 && <Empty text="No models found" />}
       <div className="grid">{items.map((model) => <ModelCard key={model.id} model={model} />)}</div>
-      {page.data?.nextCursor && <button type="button" className="load" onClick={() => setCursor(page.data.nextCursor)}>Load more</button>}
+      {page.hasNextPage && <button type="button" className="load" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more'}</button>}
     </section>
   );
 }
@@ -280,6 +281,14 @@ function UploadPage() {
         return;
       }
       updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing' });
+      if (!model.primaryThumb) {
+        try {
+          const refreshed = await api(`/api/models/${model.id}`) as Model;
+          if (refreshed.primaryThumb) updateItem(item.key, { model: refreshed, status: 'ready' });
+        } catch {
+          // Thumbnail events continue to reconcile uploads if this refresh races rendering.
+        }
+      }
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
     } catch {
