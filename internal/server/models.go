@@ -69,6 +69,7 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Use(a.requireAuth)
 		r.Get("/api/models", a.handleListModels)
 		r.Post("/api/models", a.handleCreateModel)
+		r.Post("/api/models/grouped", a.handleCreateGroupedModel)
 		r.Get("/api/models/{id}", a.handleGetModel)
 		r.Patch("/api/models/{id}", a.handlePatchModel)
 		r.Delete("/api/models/{id}", a.handleDeleteModel)
@@ -217,6 +218,23 @@ func (a *App) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, model)
 }
 
+func (a *App) handleCreateGroupedModel(w http.ResponseWriter, r *http.Request) {
+	uploads, title, cleanup, err := a.streamGroupedUploads(w, r)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	model, err := a.ingestGroupedStagedUploads(uploads, title)
+	if err != nil {
+		writeError(w, uploadStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, model)
+}
+
 type stagedUpload struct {
 	Path     string
 	Name     string
@@ -277,6 +295,71 @@ func (a *App) streamSingleUpload(w http.ResponseWriter, r *http.Request) (staged
 		return stagedUpload{}, nil, errors.Join(errBadUpload, errors.New("file is required"))
 	}
 	return upload, cleanup, nil
+}
+
+func (a *App) streamGroupedUploads(w http.ResponseWriter, r *http.Request) ([]stagedUpload, string, func(), error) {
+	max := a.cfg.MaxUploadMB << 20
+	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return nil, "", nil, errors.Join(errBadUpload, err)
+	}
+	stage := filepath.Join(a.cfg.DataDir, "tmp", ids.New())
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return nil, "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(stage) }
+	var uploads []stagedUpload
+	var title string
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			cleanup()
+			return nil, "", nil, errors.Join(errBadUpload, err)
+		}
+		if part.FormName() == "title" && part.FileName() == "" {
+			value, readErr := io.ReadAll(io.LimitReader(part, 257))
+			_ = part.Close()
+			if readErr != nil || len(value) > 256 {
+				cleanup()
+				return nil, "", nil, errors.Join(errBadUpload, errors.New("invalid title"))
+			}
+			title = strings.TrimSpace(string(value))
+			continue
+		}
+		if part.FormName() != "files" || part.FileName() == "" {
+			_ = part.Close()
+			cleanup()
+			return nil, "", nil, errors.Join(errBadUpload, errors.New("unexpected multipart part"))
+		}
+		name := filepath.Base(part.FileName())
+		if classifyExt(name) != "mesh" {
+			_ = part.Close()
+			cleanup()
+			return nil, "", nil, errors.Join(errBadUpload, errors.New("grouped uploads accept loose mesh files only"))
+		}
+		dst, err := containedName(stage, ids.New()+filepath.Ext(name))
+		if err != nil {
+			_ = part.Close()
+			cleanup()
+			return nil, "", nil, errors.Join(errBadUpload, err)
+		}
+		if err := copyCapped(dst, part, max); err != nil {
+			_ = part.Close()
+			cleanup()
+			return nil, "", nil, errors.Join(errBadUpload, err)
+		}
+		_ = part.Close()
+		uploads = append(uploads, stagedUpload{Path: dst, Name: name, StageDir: stage})
+	}
+	if len(uploads) < 2 {
+		cleanup()
+		return nil, "", nil, errors.Join(errBadUpload, errors.New("grouped upload requires at least two mesh files"))
+	}
+	return uploads, title, cleanup, nil
 }
 
 func uploadStatus(err error) int {
@@ -654,7 +737,6 @@ func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
 func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
 	id := ids.New()
 	now := time.Now().Unix()
-	root := filepath.Join(a.cfg.DataDir, "models", id)
 	stage := upload.StageDir
 	for _, dir := range []string{filepath.Join(stage, "files"), filepath.Join(stage, "images"), filepath.Join(stage, "thumbs")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -694,19 +776,72 @@ func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
 		}
 	}
 	model := Model{ID: id, Title: title, Description: description, TotalBytes: total, CreatedAt: now, UpdatedAt: now, Files: files, Images: images}
-	if err := os.Rename(stage, root); err != nil {
+	if err := a.persistStagedModel(stage, model); err != nil {
 		return Model{}, err
+	}
+	return model, nil
+}
+
+func (a *App) ingestGroupedStagedUploads(uploads []stagedUpload, title string) (Model, error) {
+	id := ids.New()
+	stage := uploads[0].StageDir
+	for _, dir := range []string{filepath.Join(stage, "files"), filepath.Join(stage, "images"), filepath.Join(stage, "thumbs")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return Model{}, err
+		}
+	}
+	defer os.RemoveAll(stage)
+	usedNames := map[string]struct{}{}
+	files := make([]ModelFile, 0, len(uploads))
+	var total int64
+	for _, upload := range uploads {
+		base := filepath.Base(upload.Name)
+		name := base
+		for suffix := 1; ; suffix++ {
+			key := strings.ToLower(name)
+			if _, exists := usedNames[key]; !exists {
+				usedNames[key] = struct{}{}
+				break
+			}
+			name = uniqueName(base, suffix)
+		}
+		dst := filepath.Join(stage, "files", name)
+		if err := os.Rename(upload.Path, dst); err != nil {
+			return Model{}, err
+		}
+		file, err := a.buildFileRecord(id, dst, filepath.ToSlash(filepath.Join("files", name)), len(files))
+		if err != nil {
+			return Model{}, errors.Join(errBadUpload, err)
+		}
+		files = append(files, file)
+		total += file.SizeBytes
+	}
+	if title = strings.TrimSpace(title); title == "" {
+		title = strings.TrimSuffix(files[0].Filename, filepath.Ext(files[0].Filename))
+	}
+	now := time.Now().Unix()
+	model := Model{ID: id, Title: title, TotalBytes: total, CreatedAt: now, UpdatedAt: now, Files: files}
+	if err := a.persistStagedModel(stage, model); err != nil {
+		return Model{}, err
+	}
+	return model, nil
+}
+
+func (a *App) persistStagedModel(stage string, model Model) error {
+	root := filepath.Join(a.cfg.DataDir, "models", model.ID)
+	if err := os.Rename(stage, root); err != nil {
+		return err
 	}
 	if err := a.insertModel(model); err != nil {
 		_ = os.RemoveAll(root)
-		return Model{}, err
+		return err
 	}
 	if err := a.writeSidecar(model); err != nil {
 		_, _ = a.db.Exec(`DELETE FROM models WHERE id = ?`, model.ID)
 		_ = os.RemoveAll(root)
-		return Model{}, err
+		return err
 	}
-	return model, nil
+	return nil
 }
 
 func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []Image, string, error) {

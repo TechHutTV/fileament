@@ -58,6 +58,72 @@ endsolid p`,
 	}
 }
 
+func TestGroupedModelUploadCreatesOneModelWithVariants(t *testing.T) {
+	app := newAuthedTestApp(t)
+	body, contentType := multipartGroupedModel(t, "OpenGrid Baseplate", map[string]string{
+		"baseplate-2x2.stl": validSTL(),
+		"baseplate-3x3.stl": strings.ReplaceAll(validSTL(), "vertex 1 0 0", "vertex 3 0 0"),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/models/grouped", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(loginCookie(t, app, "password-password"))
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grouped upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created Model
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Title != "OpenGrid Baseplate" || len(created.Files) != 2 {
+		t.Fatalf("created model = %#v", created)
+	}
+	var models, files int
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM models`).Scan(&models); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM files WHERE model_id = ?`, created.ID).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if models != 1 || files != 2 {
+		t.Fatalf("models=%d files=%d", models, files)
+	}
+}
+
+func TestGroupedModelUploadRejectsInvalidVariantWithoutPartialModel(t *testing.T) {
+	app := newAuthedTestApp(t)
+	body, contentType := multipartGroupedModel(t, "Broken Group", map[string]string{
+		"valid.stl":   validSTL(),
+		"invalid.stl": "not a mesh",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/models/grouped", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(loginCookie(t, app, "password-password"))
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("grouped upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var models, files int
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM models`).Scan(&models); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if models != 0 || files != 0 {
+		t.Fatalf("partial data remained: models=%d files=%d", models, files)
+	}
+	entries, err := os.ReadDir(filepath.Join(app.cfg.DataDir, "models"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("partial model directory remained: %v", entries)
+	}
+}
+
 func TestMultipartRequestCapIncludesHeadersAndOverhead(t *testing.T) {
 	app := newAuthedTestApp(t)
 	app.cfg.MaxUploadMB = 1
@@ -123,6 +189,28 @@ func multipartZip(t *testing.T, files map[string]string) (io.Reader, string) {
 		t.Fatal(err)
 	}
 	_, _ = part.Write(zipBuf.Bytes())
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &body, mw.FormDataContentType()
+}
+
+func multipartGroupedModel(t *testing.T, title string, files map[string]string) (io.Reader, string) {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("title", title); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range files {
+		part, err := mw.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte(contents)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := mw.Close(); err != nil {
 		t.Fatal(err)
 	}

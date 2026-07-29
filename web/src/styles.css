@@ -1141,6 +1141,84 @@ label textarea {
   margin: 14px 0 0;
 }
 
+.upload-organization {
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 14px;
+  margin: 0 0 14px;
+  padding: 16px;
+}
+
+.upload-organization legend {
+  font-size: 14px;
+  font-weight: 700;
+  padding: 0 5px;
+}
+
+.upload-organization-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.upload-organization-options label {
+  align-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 10px;
+  cursor: pointer;
+  display: grid;
+  gap: 11px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 13px;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.upload-organization-options label:hover,
+.upload-organization-options label.selected {
+  background: color-mix(in srgb, #1e6b58 8%, transparent);
+  border-color: color-mix(in srgb, #1e6b58 48%, currentColor 12%);
+}
+
+.upload-organization-options input[type="radio"] {
+  accent-color: #1e6b58;
+  margin: 0;
+  min-height: auto;
+  padding: 0;
+  width: 17px;
+}
+
+.upload-organization-options span,
+.grouped-model-title > span {
+  display: grid;
+  gap: 3px;
+}
+
+.upload-organization-options small,
+.upload-organization-note,
+.grouped-model-title small {
+  color: color-mix(in srgb, currentColor 56%, transparent);
+}
+
+.grouped-model-title {
+  margin-top: 12px;
+}
+
+.grouped-model-title > span {
+  font-size: 13px;
+  font-weight: 650;
+  grid-template-columns: auto 1fr;
+}
+
+.grouped-model-title small {
+  font-weight: 400;
+}
+
+.upload-organization-note {
+  display: block;
+  line-height: 1.45;
+  margin-top: 12px;
+}
+
 .upload-collection {
   align-items: center;
   background: color-mix(in srgb, currentColor 3%, transparent);
@@ -1497,6 +1575,10 @@ label textarea {
 
   .upload-dropzone {
     min-height: 240px;
+  }
+
+  .upload-organization-options {
+    grid-template-columns: 1fr;
   }
 
   .upload-collection {

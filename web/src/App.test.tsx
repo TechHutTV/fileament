@@ -79,6 +79,7 @@ test('manages a dropped multi-model upload queue', async () => {
   }));
   renderApp();
 
+  expect(await screen.findByRole('radio', { name: /separate models/i })).toBeChecked();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   expect(screen.getByLabelText(/choose 3d files/i)).toHaveAttribute('multiple');
   const cube = new File(['solid cube'], 'cube.stl', { type: 'model/stl' });
@@ -95,6 +96,77 @@ test('manages a dropped multi-model upload queue', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: /finish and view library/i }));
   expect(window.location.pathname).toBe('/');
+});
+
+test('creates one atomic model when loose files are grouped as variants', async () => {
+  window.history.pushState({}, '', '/upload');
+  const groupedUploads: { title: string; files: string[] }[] = [];
+  const singleUploads: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([]);
+    if (url === '/api/models/grouped' && init?.method === 'POST') {
+      const body = init.body as FormData;
+      const files = body.getAll('files').map((entry) => (entry as File).name);
+      groupedUploads.push({ title: String(body.get('title') ?? ''), files });
+      return Response.json({
+        ...model,
+        id: 'opengrid-baseplate',
+        title: 'OpenGrid Baseplate',
+        primaryThumb: 'card.png',
+        files: files.map((filename, index) => ({ ...model.files[0], id: `f${index}`, modelId: 'opengrid-baseplate', filename })),
+      }, { status: 201 });
+    }
+    if (url === '/api/models' && init?.method === 'POST') {
+      singleUploads.push(((init.body as FormData).get('file') as File).name);
+    }
+    return Response.json({});
+  }));
+  renderApp();
+
+  fireEvent.click(await screen.findByRole('radio', { name: /one model with variants/i }));
+  fireEvent.change(screen.getByLabelText('Grouped model name'), { target: { value: 'OpenGrid Baseplate' } });
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'baseplate-2x2.stl'), new File(['b'], 'baseplate-3x3.stl')] } });
+
+  await waitFor(() => expect(groupedUploads).toEqual([{ title: 'OpenGrid Baseplate', files: ['baseplate-2x2.stl', 'baseplate-3x3.stl'] }]));
+  expect(singleUploads).toEqual([]);
+  expect(await screen.findByText('OpenGrid Baseplate')).toBeInTheDocument();
+});
+
+test('keeps ZIP bundles separate while grouping loose files', async () => {
+  window.history.pushState({}, '', '/upload');
+  const uploads: { path: string; files: string[] }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([]);
+    if ((url === '/api/models' || url === '/api/models/grouped') && init?.method === 'POST') {
+      const body = init.body as FormData;
+      const files = url.endsWith('/grouped')
+        ? body.getAll('files').map((entry) => (entry as File).name)
+        : [((body.get('file')) as File).name];
+      uploads.push({ path: url, files });
+      const name = files[0];
+      return Response.json({ ...model, id: name, title: name, primaryThumb: 'card.png' }, { status: 201 });
+    }
+    return Response.json({});
+  }));
+  renderApp();
+
+  fireEvent.click(await screen.findByRole('radio', { name: /one model with variants/i }));
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [
+    new File(['zip-a'], 'alpha.zip'),
+    new File(['mesh-a'], 'baseplate-2x2.stl'),
+    new File(['mesh-b'], 'baseplate-3x3.stl'),
+    new File(['zip-b'], 'beta.zip'),
+  ] } });
+
+  await waitFor(() => expect(uploads).toEqual([
+    { path: '/api/models', files: ['alpha.zip'] },
+    { path: '/api/models/grouped', files: ['baseplate-2x2.stl', 'baseplate-3x3.stl'] },
+    { path: '/api/models', files: ['beta.zip'] },
+  ]));
 });
 
 test('adds uploaded models to the selected collection', async () => {
@@ -463,7 +535,7 @@ test('detail management actions call owner APIs and preserve viewer gate', async
   await waitFor(() => expect(calls).toContain('POST /api/shares'));
 });
 
-test('detail promotes downloading the selected viewer file', async () => {
+test('detail uses consistent variant terminology and promotes the selected download', async () => {
   window.history.pushState({}, '', '/models/m1');
   const secondFile = { ...model.files[0], id: 'f2', filename: 'bracket.3mf', relPath: 'files/bracket.3mf', format: '3mf' };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -478,8 +550,10 @@ test('detail promotes downloading the selected viewer file', async () => {
   const firstDownload = await screen.findByRole('link', { name: /download cube\.stl/i });
   expect(firstDownload).toHaveAttribute('href', '/files/m1/f1');
   expect(firstDownload).toHaveAttribute('download', 'cube.stl');
+  expect(screen.getByRole('heading', { name: 'Variants and downloads' })).toBeInTheDocument();
+  expect(screen.getByText('Add variants')).toBeInTheDocument();
 
-  fireEvent.change(screen.getByLabelText('Viewer file'), { target: { value: 'f2' } });
+  fireEvent.change(screen.getByLabelText('Variant'), { target: { value: 'f2' } });
   const secondDownload = screen.getByRole('link', { name: /download bracket\.3mf/i });
   expect(secondDownload).toHaveAttribute('href', '/files/m1/f2');
   expect(secondDownload).toHaveAttribute('download', 'bracket.3mf');
