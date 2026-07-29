@@ -97,6 +97,63 @@ test('manages a dropped multi-model upload queue', async () => {
   expect(window.location.pathname).toBe('/');
 });
 
+test('adds uploaded models to the selected collection', async () => {
+  window.history.pushState({}, '', '/upload');
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      return Response.json({ ...model, id: file.name, title: file.name, primaryThumb: 'card.png' }, { status: 201 });
+    }
+    if (url.startsWith('/api/collections/c1/models/') && init?.method === 'PUT') return new Response(null, { status: 204 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const collection = await screen.findByLabelText('Add uploads to collection');
+  await screen.findByRole('option', { name: 'Fixtures' });
+  fireEvent.change(collection, { target: { value: 'c1' } });
+  expect(collection).toHaveValue('c1');
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl'), new File(['b'], 'bracket.stl')] } });
+
+  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
+  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/bracket.stl'));
+});
+
+test('cleans up a model cancelled while collection assignment is in flight', async () => {
+  window.history.pushState({}, '', '/upload');
+  let releaseAssignment: (response: Response) => void = () => undefined;
+  const assignment = new Promise<Response>((resolve) => { releaseAssignment = resolve; });
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
+    if (url === '/api/models' && init?.method === 'POST') return Response.json({ ...model, id: 'cube.stl', title: 'cube.stl', primaryThumb: 'card.png' }, { status: 201 });
+    if (url === '/api/collections/c1/models/cube.stl' && init?.method === 'PUT') return assignment;
+    if (url === '/api/models/cube.stl' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const collection = await screen.findByLabelText('Add uploads to collection');
+  await screen.findByRole('option', { name: 'Fixtures' });
+  fireEvent.change(collection, { target: { value: 'c1' } });
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl')] } });
+  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel cube.stl upload' }));
+  releaseAssignment(new Response(null, { status: 204 }));
+
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
+  expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
+});
+
 test('serializes automatic uploads to avoid concurrent database writes', async () => {
   window.history.pushState({}, '', '/upload');
   const uploads: string[] = [];
@@ -295,6 +352,28 @@ test('polishes empty collections and settings with active navigation and grouped
   expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('aria-current', 'page');
 });
 
+test('persists the selected model color from settings', async () => {
+  localStorage.removeItem('fileament-model-color');
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  const picker = await screen.findByLabelText('Model color');
+  expect(picker).toHaveValue('#4f9f88');
+  fireEvent.change(picker, { target: { value: '#c47742' } });
+  expect(localStorage.getItem('fileament-model-color')).toBe('#c47742');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Use blue model color' }));
+  expect(picker).toHaveValue('#4f7fb5');
+  expect(localStorage.getItem('fileament-model-color')).toBe('#4f7fb5');
+});
+
 test('reports a collections query failure instead of an empty state', async () => {
   window.history.pushState({}, '', '/collections');
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -349,6 +428,28 @@ test('detail management actions call owner APIs and preserve viewer gate', async
   await waitFor(() => expect(calls).toContain('PATCH /api/models/m1'));
   fireEvent.click(screen.getByRole('button', { name: /create share/i }));
   await waitFor(() => expect(calls).toContain('POST /api/shares'));
+});
+
+test('detail promotes downloading the selected viewer file', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  const secondFile = { ...model.files[0], id: 'f2', filename: 'bracket.3mf', relPath: 'files/bracket.3mf', format: '3mf' };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/models/m1')) return Response.json({ ...model, files: [...model.files, secondFile] });
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  const firstDownload = await screen.findByRole('link', { name: /download cube\.stl/i });
+  expect(firstDownload).toHaveAttribute('href', '/files/m1/f1');
+  expect(firstDownload).toHaveAttribute('download', 'cube.stl');
+
+  fireEvent.change(screen.getByLabelText('Viewer file'), { target: { value: 'f2' } });
+  const secondDownload = screen.getByRole('link', { name: /download bracket\.3mf/i });
+  expect(secondDownload).toHaveAttribute('href', '/files/m1/f2');
+  expect(secondDownload).toHaveAttribute('download', 'bracket.3mf');
 });
 
 test('collection detail supports metadata, cover, ordering, and deletion', async () => {

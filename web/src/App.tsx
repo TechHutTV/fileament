@@ -1,12 +1,21 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { Box, Check, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { getModelColor, saveModelColor } from './viewerPreferences';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
 const NAVIGATION_EVENT = 'fileament:navigate';
 const client = new QueryClient();
+const MODEL_COLOR_PRESETS = [
+  ['green', '#4f9f88'],
+  ['blue', '#4f7fb5'],
+  ['orange', '#c47742'],
+  ['red', '#a95353'],
+  ['violet', '#7b68a6'],
+  ['neutral', '#8a9290'],
+] as const;
 
 export type ModelFile = {
   id: string;
@@ -41,7 +50,7 @@ type Me = { authenticated: boolean; setupRequired: boolean };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
 type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
-type UploadItem = { key: string; file: File; status: UploadStatus; model?: Model; error?: string };
+type UploadItem = { key: string; file: File; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
 
 export function Root() {
   return <QueryClientProvider client={client}><App /></QueryClientProvider>;
@@ -205,6 +214,7 @@ function Detail({ id }: { id: string }) {
         {file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/thumbs/${model.id}/${model.primaryThumb}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
       </div>
       <aside className="panel">
+        {file && <a className="model-download-primary" href={`/files/${model.id}/${file.id}`} download={file.filename}><span className="model-download-icon"><Download size={22} /></span><span className="model-download-copy"><strong>Download {file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></a>}
         <ModelEditor model={model} onSave={(body) => patch.mutate(body)} />
         <Markdown text={model.description} />
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
@@ -251,6 +261,9 @@ function UploadPage() {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [collectionID, setCollectionID] = useState('');
+  const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
+  const collectionItems = Array.isArray(collections.data) ? collections.data : [];
   const sequence = useRef(0);
   const input = useRef<HTMLInputElement>(null);
   const pending = useRef(new Set<string>());
@@ -267,7 +280,8 @@ function UploadPage() {
     body.append('file', item.file);
     try {
       const model = await api('/api/models', { method: 'POST', body }) as Model;
-      if (cancelled.current.has(item.key)) {
+      const discardIfCancelled = async () => {
+        if (!cancelled.current.has(item.key)) return false;
         try {
           await api(`/api/models/${model.id}`, { method: 'DELETE' });
         } catch {
@@ -278,9 +292,20 @@ function UploadPage() {
           qc.invalidateQueries({ queryKey: ['models'] });
           qc.invalidateQueries({ queryKey: ['storage'] });
         }
-        return;
+        return true;
+      };
+      if (await discardIfCancelled()) return;
+      let collectionError: string | undefined;
+      if (item.collectionID) {
+        try {
+          await api(`/api/collections/${item.collectionID}/models/${model.id}`, { method: 'PUT' });
+          qc.invalidateQueries({ queryKey: ['collections'] });
+        } catch {
+          collectionError = 'Uploaded, but could not add this model to the collection.';
+        }
       }
-      updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing' });
+      if (await discardIfCancelled()) return;
+      updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing', error: collectionError });
       if (!model.primaryThumb) {
         try {
           const refreshed = await api(`/api/models/${model.id}`) as Model;
@@ -302,7 +327,7 @@ function UploadPage() {
   };
 
   const addFiles = (files: FileList | File[]) => {
-    const queued = Array.from(files).map((file) => ({ key: `upload-${++sequence.current}`, file, status: 'queued' as const }));
+    const queued = Array.from(files).map((file) => ({ key: `upload-${++sequence.current}`, file, status: 'queued' as const, collectionID: collectionID || undefined }));
     if (queued.length === 0) return;
     queued.forEach((item) => pending.current.add(item.key));
     setItems((current) => [...current, ...queued]);
@@ -359,6 +384,14 @@ function UploadPage() {
       <h1>Build your library</h1>
       <p>Drop individual models or ZIP bundles. Each file uploads automatically and becomes its own catalog entry.</p>
     </header>
+    <label className="upload-collection">
+      <span className="upload-collection-icon"><Folder size={20} /></span>
+      <span className="upload-collection-copy"><strong>Organize uploads</strong><small>The selected collection applies to the next files you add.</small></span>
+      <select aria-label="Add uploads to collection" value={collectionID} onChange={(event) => setCollectionID(event.target.value)}>
+        <option value="">Library only</option>
+        {collectionItems.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+      </select>
+    </label>
     <div
       className={`upload-dropzone${dragging ? ' dragging' : ''}`}
       role="button"
@@ -401,10 +434,19 @@ function SettingsPage() {
   const revoke = useMutation({ mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [modelColor, setModelColor] = useState(getModelColor);
+  const chooseModelColor = (color: string) => setModelColor(saveModelColor(color));
   const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); } });
   return <section className="content narrow settings-page">
-    <PageHeader eyebrow="Owner controls" title="Settings" description="Manage storage, account security, and public access to your library." />
+    <PageHeader eyebrow="Owner controls" title="Settings" description="Manage appearance, storage, account security, and public access to your library." />
     <div className="storage-card"><span className="surface-icon"><HardDrive size={20} /></span><div><span>Library storage</span><strong>{formatBytes(data?.totalBytes ?? 0)}</strong></div></div>
+    <section className="surface-card settings-card">
+      <SectionHeading icon={<Palette size={19} />} title="Viewer" description="Choose the material color used for STL and OBJ model previews on this browser." />
+      <div className="model-color-setting">
+        <label className="model-color-picker"><input type="color" aria-label="Model color" value={modelColor} onChange={(event) => chooseModelColor(event.target.value)} /><span><strong>Model color</strong><small>{modelColor.toUpperCase()}</small></span></label>
+        <div className="model-color-presets" role="group" aria-label="Model color presets">{MODEL_COLOR_PRESETS.map(([name, color]) => <button type="button" className="model-color-preset" aria-label={`Use ${name} model color`} aria-pressed={modelColor === color} title={name} style={{ backgroundColor: color }} onClick={() => chooseModelColor(color)} key={color} />)}</div>
+      </div>
+    </section>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Lock size={19} />} title="Security" description="Update the password used to access this private library." />
       <form className="stack settings-form" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><small className="field-help">Use at least 12 characters.</small><button type="submit" disabled={change.isPending}>{change.isPending ? 'Updating password' : 'Change password'}</button>{change.isError && <p className="error">Password change failed</p>}{change.isSuccess && <p className="success">Password updated.</p>}</form>
