@@ -15,7 +15,11 @@ import (
 
 func main() {
 	cfg := config.FromEnv()
-	app, err := server.New(cfg)
+	webFS, err := webFilesystem(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	app, err := server.New(cfg, webFS)
 	if err != nil {
 		log.Fatal(err)
 	}

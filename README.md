@@ -53,6 +53,7 @@ docker compose up --build
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FILEAMENT_DATA_DIR` | `/data` | Storage root for SQLite, uploaded files, thumbnails, and sidecars. |
+| `FILEAMENT_WEB_DIR` | `web/dist` | Frontend directory for untagged local builds; production binaries embed the UI. |
 | `FILEAMENT_PORT` | `8080` | HTTP listen port inside the container. |
 | `FILEAMENT_OWNER_PASSWORD` | unset | Seeds the owner password on first boot. If unset, use the setup screen. |
 | `FILEAMENT_MAX_UPLOAD_MB` | `2048` | Per-request upload cap and ZIP uncompressed-size cap. |
@@ -118,7 +119,7 @@ The initial model upload remains `POST /api/models`; append mesh files, ZIP bund
 
 ## Development
 
-The host environment for this repo does not need Go installed. Run Go commands through Docker:
+The Go backend and frontend can be tested independently. The host environment for this repo does not need Go installed; run Go commands through Docker:
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine go test ./...
@@ -141,7 +142,7 @@ npm test
 npm run build
 ```
 
-`npm run build` writes the Vite bundle into `internal/server/dist`, which is embedded into the Go binary.
+`npm run build` writes the ignored Vite bundle to `web/dist`. Untagged local Go builds read that directory through `FILEAMENT_WEB_DIR`. Docker stages the bundle under the ignored `cmd/fileament/dist`, compiles with the `embedded_ui` build tag, and publishes a standalone binary containing the UI. Generated HTML, JavaScript, and CSS are never committed.
 
 ## Storage Layout
 

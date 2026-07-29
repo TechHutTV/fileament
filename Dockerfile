@@ -13,8 +13,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=web /internal/server/dist ./internal/server/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o /fileament ./cmd/fileament
+COPY --from=web /web/dist ./cmd/fileament/dist
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags embedded_ui -ldflags="-s -w" -o /fileament ./cmd/fileament
 
 FROM gcr.io/distroless/static
 COPY --from=build /fileament /fileament

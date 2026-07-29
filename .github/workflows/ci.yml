@@ -16,6 +16,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: Verify generated frontend is not tracked
+        run: test -z "$(git ls-files web/dist cmd/fileament/dist internal/server/dist)"
+
       - name: Go test
         run: |
           docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/")'
