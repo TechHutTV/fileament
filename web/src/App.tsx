@@ -50,7 +50,8 @@ type Me = { authenticated: boolean; setupRequired: boolean };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
 type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
-type UploadItem = { key: string; file: File; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
+type UploadOrganization = 'separate' | 'grouped';
+type UploadItem = { key: string; file: File; files: File[]; title?: string; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
 
 export function Root() {
   return <QueryClientProvider client={client}><App /></QueryClientProvider>;
@@ -219,10 +220,10 @@ function Detail({ id }: { id: string }) {
         <Markdown text={model.description} />
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
-        <h2>Files</h2>
-        <Select label="Viewer file" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />
+        <h2>Variants and downloads</h2>
+        <Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />
         {model.files.map((f) => <div className="file model-file" key={f.id}><div className="model-file-copy"><a href={`/files/${model.id}/${f.id}`}><Download size={16} /><span>{f.filename}</span></a><small>{f.triangleCount} tris · {dims(f)} · {formatBytes(f.sizeBytes)}</small></div><div className="model-file-actions"><button type="button" className="icon" title="Use thumbnail" onClick={() => setThumb.mutate(f.id)}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" onClick={() => deleteFile.mutate(f.id)}><Trash2 size={16} /></button></div></div>)}
-        <UploadInline label="Add files or ZIP" path={`/api/models/${id}/files`} onDone={invalidate} />
+        <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
         <div className="images">{model.images?.map((img) => <figure key={img.id}><img src={`/images/${model.id}/${img.id}`} alt={`${model.title} image`} /><button type="button" className="icon danger" onClick={() => deleteImage.mutate(img.id)}><X size={16} /></button></figure>)}</div>
         <UploadInline label="Add images" path={`/api/models/${id}/images`} onDone={invalidate} />
@@ -262,6 +263,8 @@ function UploadPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [collectionID, setCollectionID] = useState('');
+  const [organization, setOrganization] = useState<UploadOrganization>('separate');
+  const [groupedTitle, setGroupedTitle] = useState('');
   const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const collectionItems = Array.isArray(collections.data) ? collections.data : [];
   const sequence = useRef(0);
@@ -277,9 +280,15 @@ function UploadPage() {
   const uploadItem = async (item: UploadItem) => {
     updateItem(item.key, { status: 'uploading' });
     const body = new FormData();
-    body.append('file', item.file);
+    const grouped = item.files.length > 1;
+    if (grouped) {
+      body.append('title', item.title ?? '');
+      item.files.forEach((file) => body.append('files', file));
+    } else {
+      body.append('file', item.file);
+    }
     try {
-      const model = await api('/api/models', { method: 'POST', body }) as Model;
+      const model = await api(grouped ? '/api/models/grouped' : '/api/models', { method: 'POST', body }) as Model;
       const discardIfCancelled = async () => {
         if (!cancelled.current.has(item.key)) return false;
         try {
@@ -330,7 +339,24 @@ function UploadPage() {
   };
 
   const addFiles = (files: FileList | File[]) => {
-    const queued = Array.from(files).map((file) => ({ key: `upload-${++sequence.current}`, file, status: 'queued' as const, collectionID: collectionID || undefined }));
+    const selected = Array.from(files);
+    const loose = selected.filter((file) => !file.name.toLowerCase().endsWith('.zip'));
+    const groupedLoose = organization === 'grouped' && loose.length > 1;
+    let looseQueued = false;
+    const batches = selected.flatMap((file) => {
+      if (file.name.toLowerCase().endsWith('.zip') || !groupedLoose) return [[file]];
+      if (looseQueued) return [];
+      looseQueued = true;
+      return [loose];
+    });
+    const queued = batches.map((batch) => ({
+      key: `upload-${++sequence.current}`,
+      file: batch[0],
+      files: batch,
+      title: batch.length > 1 ? groupedTitle.trim() || undefined : undefined,
+      status: 'queued' as const,
+      collectionID: collectionID || undefined,
+    }));
     if (queued.length === 0) return;
     queued.forEach((item) => pending.current.add(item.key));
     setItems((current) => [...current, ...queued]);
@@ -386,8 +412,23 @@ function UploadPage() {
     <header className="upload-header">
       <span className="eyebrow">Add models</span>
       <h1>Build your library</h1>
-      <p>Drop individual models or ZIP bundles. Each file uploads automatically and becomes its own catalog entry.</p>
+      <p>Choose how loose files become models. ZIP bundles always stay together as one model with variants.</p>
     </header>
+    <fieldset className="upload-organization">
+      <legend>Loose file organization</legend>
+      <div className="upload-organization-options">
+        <label className={organization === 'separate' ? 'selected' : ''}>
+          <input type="radio" name="upload-organization" value="separate" checked={organization === 'separate'} onChange={() => setOrganization('separate')} />
+          <span><strong>Separate models</strong><small>Default · one library model per loose file</small></span>
+        </label>
+        <label className={organization === 'grouped' ? 'selected' : ''}>
+          <input type="radio" name="upload-organization" value="grouped" checked={organization === 'grouped'} onChange={() => setOrganization('grouped')} />
+          <span><strong>One model with variants</strong><small>Group multiple loose files into one model</small></span>
+        </label>
+      </div>
+      {organization === 'grouped' && <label className="grouped-model-title"><span>Model name <small>Optional</small></span><input aria-label="Grouped model name" value={groupedTitle} placeholder="Uses the first variant name" onChange={(event) => setGroupedTitle(event.target.value)} /></label>}
+      <small className="upload-organization-note">This choice applies only to loose STL, OBJ, and 3MF files. Every ZIP remains its own model.</small>
+    </fieldset>
     <label className="upload-collection">
       <span className="upload-collection-icon"><Folder size={20} /></span>
       <span className="upload-collection-copy"><strong>Organize uploads</strong><small>The selected collection applies to the next files you add.</small></span>
@@ -417,13 +458,15 @@ function UploadPage() {
     {items.length > 0 && <section className="upload-queue" aria-live="polite">
       <div className="queue-heading"><div><span className="eyebrow">Upload queue</span><h2>{items.length} {items.length === 1 ? 'model' : 'models'}</h2></div><span>{completed} uploaded</span></div>
       <div className="upload-grid">{items.map((item) => {
+        const itemName = item.model?.title || item.title || item.file.name;
+        const itemBytes = item.files.reduce((total, file) => total + file.size, 0);
         const thumbnail = item.model?.primaryThumb ? `/thumbs/${item.model.id}/${item.model.primaryThumb}` : '';
         const label = item.status === 'queued' ? 'Queued' : item.status === 'uploading' ? 'Uploading' : item.status === 'processing' ? 'Generating preview' : item.status === 'ready' ? 'Ready' : item.status === 'removing' ? 'Removing' : 'Needs attention';
         const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
         return <article className={`upload-card ${item.status}`} key={item.key}>
-          <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${item.file.name} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
-          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${item.file.name}${item.model ? '' : ' upload'}`} onClick={() => { void removeItem(item); }} disabled={item.status === 'removing'}><X size={17} /></button>
-          <div className="upload-card-body"><div><h3>{item.model?.title || item.file.name}</h3><p>{item.file.name} · {formatBytes(item.file.size)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
+          <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${itemName} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
+          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { void removeItem(item); }} disabled={item.status === 'removing'}><X size={17} /></button>
+          <div className="upload-card-body"><div><h3>{itemName}</h3><p>{item.files.length > 1 ? `${item.files.length} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
         </article>;
       })}</div>
     </section>}
@@ -522,7 +565,7 @@ function PublicModel({ model, token }: { model: Model; token: string }) {
   const [forceViewer, setForceViewer] = useState(false);
   const file = model.files.find((f) => f.id === selectedFileID) ?? model.files[0];
   const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
-  return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><Select label="Viewer file" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
+  return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2><Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
 }
 
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {
