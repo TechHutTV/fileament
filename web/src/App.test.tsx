@@ -124,6 +124,37 @@ test('adds uploaded models to the selected collection', async () => {
   await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/bracket.stl'));
 });
 
+test('refreshes collections after removing an assigned upload', async () => {
+  window.history.pushState({}, '', '/upload');
+  let collectionFetches = 0;
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') {
+      collectionFetches += 1;
+      return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
+    }
+    if (url === '/api/models' && init?.method === 'POST') return Response.json({ ...model, id: 'cube.stl', title: 'cube.stl', primaryThumb: 'card.png' }, { status: 201 });
+    if (url === '/api/collections/c1/models/cube.stl' && init?.method === 'PUT') return new Response(null, { status: 204 });
+    if (url === '/api/models/cube.stl' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  const collection = await screen.findByLabelText('Add uploads to collection');
+  await screen.findByRole('option', { name: 'Fixtures' });
+  fireEvent.change(collection, { target: { value: 'c1' } });
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl')] } });
+  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
+  await waitFor(() => expect(collectionFetches).toBe(2));
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Remove cube.stl' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
+  await waitFor(() => expect(collectionFetches).toBe(3));
+});
+
 test('cleans up a model cancelled while collection assignment is in flight', async () => {
   window.history.pushState({}, '', '/upload');
   let releaseAssignment: (response: Response) => void = () => undefined;
@@ -151,6 +182,8 @@ test('cleans up a model cancelled while collection assignment is in flight', asy
   releaseAssignment(new Response(null, { status: 204 }));
 
   await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
+  await waitFor(() => expect(calls.filter((call) => call === 'GET /api/collections')).toHaveLength(2));
+  expect(calls.lastIndexOf('GET /api/collections')).toBeGreaterThan(calls.indexOf('DELETE /api/models/cube.stl'));
   expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
 });
 

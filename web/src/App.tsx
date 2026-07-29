@@ -292,19 +292,22 @@ function UploadPage() {
           qc.invalidateQueries({ queryKey: ['models'] });
           qc.invalidateQueries({ queryKey: ['storage'] });
         }
+        qc.invalidateQueries({ queryKey: ['collections'] });
         return true;
       };
       if (await discardIfCancelled()) return;
       let collectionError: string | undefined;
+      let collectionChanged = false;
       if (item.collectionID) {
         try {
           await api(`/api/collections/${item.collectionID}/models/${model.id}`, { method: 'PUT' });
-          qc.invalidateQueries({ queryKey: ['collections'] });
+          collectionChanged = true;
         } catch {
           collectionError = 'Uploaded, but could not add this model to the collection.';
         }
       }
       if (await discardIfCancelled()) return;
+      if (collectionChanged) qc.invalidateQueries({ queryKey: ['collections'] });
       updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing', error: collectionError });
       if (!model.primaryThumb) {
         try {
@@ -355,6 +358,7 @@ function UploadPage() {
       setItems((current) => current.filter((candidate) => candidate.key !== item.key));
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
+      qc.invalidateQueries({ queryKey: ['collections'] });
     } catch {
       updateItem(item.key, { status: 'error', error: 'Could not remove this model.' });
     } finally {

@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { createElement, forwardRef, isValidElement, useImperativeHandle, type ReactNode } from 'react';
 import { BufferGeometry, Float32BufferAttribute } from 'three';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import ModelViewer from './Viewer';
 import { prepareSTLGeometry } from './viewerGeometry';
 
@@ -50,6 +50,18 @@ vi.mock('@react-three/drei', () => {
   };
 });
 
+afterEach(() => {
+  viewerControls.bounds.refresh.mockClear();
+  viewerControls.bounds.clip.mockClear();
+  viewerControls.bounds.fit.mockClear();
+  viewerControls.orbit.dollyIn.mockClear();
+  viewerControls.orbit.dollyOut.mockClear();
+  viewerControls.orbit.update.mockClear();
+  viewerControls.renderModel = false;
+  localStorage.removeItem('fileament-model-color');
+  vi.restoreAllMocks();
+});
+
 test('uses only local viewer lighting', () => {
   render(<ModelViewer file={{ id: 'f1', modelId: 'm1', filename: 'cube.stl', relPath: 'files/cube.stl', format: 'stl', sizeBytes: 1, triangleCount: 1, bboxX: 1, bboxY: 1, bboxZ: 1 }} url="/mesh/m1/f1" />);
 
@@ -72,16 +84,11 @@ test('offers minimal click controls for zooming and resetting the fitted view', 
 test('uses the saved model color for STL material and edges', () => {
   localStorage.setItem('fileament-model-color', '#c47742');
   viewerControls.renderModel = true;
-  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-  const view = render(<ModelViewer file={{ id: 'f1', modelId: 'm1', filename: 'cube.stl', relPath: 'files/cube.stl', format: 'stl', sizeBytes: 1, triangleCount: 1, bboxX: 1, bboxY: 1, bboxZ: 1 }} url="/mesh/m1/f1" />);
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  render(<ModelViewer file={{ id: 'f1', modelId: 'm1', filename: 'cube.stl', relPath: 'files/cube.stl', format: 'stl', sizeBytes: 1, triangleCount: 1, bboxX: 1, bboxY: 1, bboxZ: 1 }} url="/mesh/m1/f1" />);
 
   expect(document.querySelector('meshstandardmaterial')).toHaveAttribute('color', '#c47742');
-  expect(document.querySelector('edges')).not.toHaveAttribute('color', '#174b3e');
-
-  view.unmount();
-  consoleError.mockRestore();
-  viewerControls.renderModel = false;
-  localStorage.removeItem('fileament-model-color');
+  expect(document.querySelector('edges')).toHaveAttribute('color', '#89512b');
 });
 
 describe('prepareSTLGeometry', () => {
