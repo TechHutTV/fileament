@@ -2,8 +2,8 @@ package server
 
 import (
 	"database/sql"
-	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -17,12 +17,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed dist
-var webFS embed.FS
-
 type App struct {
 	cfg      config.Config
 	db       *sql.DB
+	webFS    fs.FS
 	stop     chan struct{}
 	workerWG sync.WaitGroup
 	thumbMu  sync.Mutex
@@ -30,7 +28,13 @@ type App struct {
 	events   map[chan ThumbnailEvent]struct{}
 }
 
-func New(cfg config.Config) (*App, error) {
+func New(cfg config.Config, webFS fs.FS) (*App, error) {
+	if webFS == nil {
+		return nil, fmt.Errorf("web filesystem is required")
+	}
+	if _, err := fs.Stat(webFS, "index.html"); err != nil {
+		return nil, fmt.Errorf("web filesystem does not contain index.html: %w", err)
+	}
 	if err := storage.EnsureLayout(cfg.DataDir); err != nil {
 		return nil, err
 	}
@@ -47,7 +51,7 @@ func New(cfg config.Config) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}}
+	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}}
 	if err := app.seedOwnerPassword(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -109,13 +113,12 @@ func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {
-	sub, _ := fs.Sub(webFS, "dist")
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	if path == "" {
 		path = "index.html"
 	}
-	if _, err := fs.Stat(sub, path); err != nil {
-		data, readErr := fs.ReadFile(sub, "index.html")
+	if _, err := fs.Stat(a.webFS, path); err != nil {
+		data, readErr := fs.ReadFile(a.webFS, "index.html")
 		if readErr != nil {
 			http.NotFound(w, r)
 			return
@@ -130,7 +133,7 @@ func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/s/") {
 		w.Header().Set("X-Robots-Tag", "noindex")
 	}
-	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
+	http.FileServer(http.FS(a.webFS)).ServeHTTP(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

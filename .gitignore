@@ -2,6 +2,8 @@
 Thumbs.db
 node_modules/
 web/node_modules/
+web/dist/
+cmd/fileament/dist/
 coverage/
 tmp/
 *.db

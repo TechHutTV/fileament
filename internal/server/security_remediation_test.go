@@ -203,7 +203,8 @@ func TestLargestMeshBecomesDefaultCardRegardlessOfJobOrder(t *testing.T) {
 
 func TestStartupRecoversSidecarsAndRunningJobs(t *testing.T) {
 	dir := t.TempDir()
-	app := newTestAppWithConfig(t, config.Config{DataDir: dir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32})
+	webDir := testWebDir(t)
+	app := newTestAppWithConfig(t, config.Config{DataDir: dir, WebDir: webDir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32})
 	cookie := loginCookie(t, app, "password-password")
 	model := uploadSTLModel(t, app, cookie, "recover.stl", "Recover")
 	if _, err := app.db.Exec(`UPDATE jobs SET status = 'running'`); err != nil {
@@ -215,7 +216,7 @@ func TestStartupRecoversSidecarsAndRunningJobs(t *testing.T) {
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
-	app2, err := New(config.Config{DataDir: dir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32})
+	app2, err := New(config.Config{DataDir: dir, WebDir: webDir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32}, os.DirFS(webDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,7 @@ func TestStartupRecoversSidecarsAndRunningJobs(t *testing.T) {
 
 func TestStartupRebuildsCollectionsFromDurableSidecar(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.Config{DataDir: dir, OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32}
+	cfg := config.Config{DataDir: dir, WebDir: testWebDir(t), OwnerPassword: "password-password", ThumbWorkers: 0, MaxUploadMB: 32}
 	app := newTestAppWithConfig(t, cfg)
 	cookie := loginCookie(t, app, "password-password")
 	model := uploadSTLModel(t, app, cookie, "member.stl", "Member")
@@ -270,7 +271,7 @@ func TestStartupRebuildsCollectionsFromDurableSidecar(t *testing.T) {
 		}
 	}
 
-	app2, err := New(cfg)
+	app2, err := New(cfg, os.DirFS(cfg.WebDir))
 	if err != nil {
 		t.Fatal(err)
 	}

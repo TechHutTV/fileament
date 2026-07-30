@@ -7,6 +7,7 @@ import (
 
 type Config struct {
 	DataDir       string
+	WebDir        string
 	Port          string
 	OwnerPassword string
 	MaxUploadMB   int64
@@ -17,6 +18,7 @@ type Config struct {
 func FromEnv() Config {
 	return Config{
 		DataDir:       env("FILEAMENT_DATA_DIR", "/data"),
+		WebDir:        env("FILEAMENT_WEB_DIR", "web/dist"),
 		Port:          env("FILEAMENT_PORT", "8080"),
 		OwnerPassword: os.Getenv("FILEAMENT_OWNER_PASSWORD"),
 		MaxUploadMB:   envInt64("FILEAMENT_MAX_UPLOAD_MB", 2048),
