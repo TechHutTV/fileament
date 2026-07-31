@@ -721,6 +721,10 @@ label textarea {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.model-file.editing {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .model-file-copy {
   min-width: 0;
 }
@@ -742,6 +746,59 @@ label textarea {
   margin: 4px 0 0 24px;
   overflow-wrap: anywhere;
   padding: 0;
+}
+
+.model-file-rename {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.model-file-rename-field {
+  align-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 8px;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.model-file-rename-field:focus-within {
+  border-color: #1e6b58;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #1e6b58 18%, transparent);
+}
+
+.model-file-rename-field input {
+  background: transparent;
+  border: 0;
+  min-width: 0;
+  outline: 0;
+  width: 100%;
+}
+
+.file .model-file-extension {
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  flex: 0 0 auto;
+  margin: 0;
+  padding-right: 10px;
+}
+
+.model-file-rename-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.model-file-rename-actions .icon {
+  min-height: 36px;
+  width: 36px;
+}
+
+.model-file-rename-error {
+  color: #a33;
+  font-size: 12px;
+  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .model-file-actions {

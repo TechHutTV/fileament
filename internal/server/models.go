@@ -74,6 +74,7 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Patch("/api/models/{id}", a.handlePatchModel)
 		r.Delete("/api/models/{id}", a.handleDeleteModel)
 		r.Post("/api/models/{id}/files", a.handleAddModelFiles)
+		r.Patch("/api/models/{id}/files/{fid}", a.handlePatchModelFile)
 		r.Delete("/api/models/{id}/files/{fid}", a.handleDeleteModelFile)
 		r.Post("/api/models/{id}/images", a.handleAddModelImages)
 		r.Delete("/api/models/{id}/images/{imageID}", a.handleDeleteModelImage)
@@ -479,6 +480,99 @@ func (a *App) handleAddModelFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, m)
+}
+
+type patchModelFileRequest struct {
+	Filename string `json:"filename"`
+}
+
+func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
+	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	model, err := a.getModel(modelID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	fileIndex := -1
+	for i := range model.Files {
+		if model.Files[i].ID == fileID {
+			fileIndex = i
+			break
+		}
+	}
+	if fileIndex < 0 {
+		writeError(w, http.StatusNotFound, sql.ErrNoRows)
+		return
+	}
+	var req patchModelFileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	filename := strings.TrimSpace(req.Filename)
+	extension := filepath.Ext(filename)
+	invalidControl := strings.IndexFunc(filename, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
+	if len(filename) > 255 || strings.TrimSuffix(filename, extension) == "" || invalidControl || strings.Contains(filename, `"`) {
+		writeError(w, http.StatusBadRequest, errors.New("invalid filename"))
+		return
+	}
+	if _, err := containedName(a.cfg.DataDir, filename); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid filename"))
+		return
+	}
+	if !strings.EqualFold(extension, "."+model.Files[fileIndex].Format) {
+		writeError(w, http.StatusBadRequest, errors.New("filename extension must match file format"))
+		return
+	}
+	previousFilename := model.Files[fileIndex].Filename
+	if filename == previousFilename {
+		writeJSON(w, http.StatusOK, model)
+		return
+	}
+	previousUpdatedAt := model.UpdatedAt
+	updatedAt := time.Now().Unix()
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE files SET filename = ? WHERE id = ? AND model_id = ?`, filename, fileID, modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE models SET updated_at = ? WHERE id = ?`, updatedAt, modelID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	restore := func() error {
+		restoreTx, restoreErr := a.db.Begin()
+		if restoreErr == nil {
+			if _, restoreErr = restoreTx.Exec(`UPDATE files SET filename = ? WHERE id = ? AND model_id = ?`, previousFilename, fileID, modelID); restoreErr == nil {
+				_, restoreErr = restoreTx.Exec(`UPDATE models SET updated_at = ? WHERE id = ?`, previousUpdatedAt, modelID)
+			}
+			if restoreErr == nil {
+				restoreErr = restoreTx.Commit()
+			} else {
+				_ = restoreTx.Rollback()
+			}
+		}
+		return restoreErr
+	}
+	model, err = a.getModel(modelID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errors.Join(err, restore()))
+		return
+	}
+	if err := a.writeSidecar(model); err != nil {
+		writeError(w, http.StatusInternalServerError, errors.Join(err, restore()))
+		return
+	}
+	writeJSON(w, http.StatusOK, model)
 }
 
 func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {

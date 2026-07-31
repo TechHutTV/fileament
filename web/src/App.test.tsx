@@ -619,6 +619,40 @@ test('detail uses consistent variant terminology and promotes the selected downl
   expect(secondDownload).toHaveAttribute('download', 'bracket.3mf');
 });
 
+test('renames a file variation inline and preserves its format', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  let currentModel = { ...model };
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url, body: typeof init?.body === 'string' ? init.body : undefined });
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models/m1/files/f1' && method === 'PATCH') {
+      currentModel = { ...currentModel, files: [{ ...currentModel.files[0], filename: 'calibration-cube.stl' }] };
+      return Response.json(currentModel);
+    }
+    if (url === '/api/models/m1') return Response.json(currentModel);
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Rename cube.stl' }));
+  const input = screen.getByRole('textbox', { name: 'Variation name for cube.stl' });
+  expect(input).toHaveValue('cube');
+  fireEvent.change(input, { target: { value: 'calibration-cube' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save variation name' }));
+
+  await waitFor(() => expect(calls).toContainEqual({
+    method: 'PATCH',
+    url: '/api/models/m1/files/f1',
+    body: JSON.stringify({ filename: 'calibration-cube.stl' }),
+  }));
+  expect(await screen.findByRole('link', { name: /download calibration-cube\.stl/i })).toHaveAttribute('download', 'calibration-cube.stl');
+  expect(screen.getByRole('link', { name: 'calibration-cube.stl' })).toHaveAttribute('href', '/files/m1/f1');
+});
+
 test('detail places a visual variant picker below the selected download and updates the preview', async () => {
   window.history.pushState({}, '', '/models/m1');
   stubVariantDetail();
