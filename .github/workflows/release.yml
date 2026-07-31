@@ -19,6 +19,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release note policy
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fileament
+        run: |
+          python3 .github/scripts/prepare_release_notes.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --image "${IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --validate-only
+
+      - name: Prepare release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fileament
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="${RUNNER_TEMP}/release-notes.md"
+          generated="${RUNNER_TEMP}/generated-notes.md"
+          if [[ "${tag##*.}" == "0" ]]; then
+            :
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${tag}" --jq '.body'
+          fi > "${generated}"
+          python3 .github/scripts/prepare_release_notes.py \
+            --tag "${tag}" \
+            --image "${IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --generated-notes-file "${generated}" \
+            --output "${notes}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -55,22 +90,9 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/fileament
         run: |
           tag="${GITHUB_REF_NAME}"
           notes="${RUNNER_TEMP}/release-notes.md"
-          {
-            echo "## Container image"
-            echo
-            echo '```sh'
-            echo "docker pull ${IMAGE}:${tag#v}"
-            echo '```'
-            echo
-            echo "Published for \`linux/amd64\` and \`linux/arm64\`. The \`latest\` tag points to this stable release."
-            echo
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-              -f tag_name="${tag}" --jq '.body'
-          } > "${notes}"
           gh release create "${tag}" \
             --verify-tag \
             --title "Fileament ${tag}" \

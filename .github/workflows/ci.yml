@@ -10,6 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -18,6 +22,9 @@ jobs:
 
       - name: Verify generated frontend is not tracked
         run: test -z "$(git ls-files web/dist cmd/fileament/dist internal/server/dist)"
+
+      - name: Release note policy tests
+        run: python3 -m unittest discover -s .github/scripts -p '*_test.py' -v
 
       - name: Go test
         run: |
