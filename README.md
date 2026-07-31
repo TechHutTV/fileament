@@ -14,7 +14,7 @@ It runs as a single container with one persistent `/data` volume. The production
 ## Features
 
 - Upload STL, OBJ, 3MF, and ZIP bundles from your browser.
-- Keep related mesh variants together as one model.
+- Keep related mesh variants together and switch between thumbnail previews from the model page.
 - Search titles, descriptions, and tags.
 - Organize models into ordered collections with custom covers.
 - Preview supported meshes in the built-in Three.js viewer.

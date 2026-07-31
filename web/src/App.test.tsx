@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './App';
@@ -600,10 +600,42 @@ test('detail uses consistent variant terminology and promotes the selected downl
   expect(screen.getByRole('heading', { name: 'Variants and downloads' })).toBeInTheDocument();
   expect(screen.getByText('Add variants')).toBeInTheDocument();
 
-  fireEvent.change(screen.getByLabelText('Variant'), { target: { value: 'f2' } });
+  fireEvent.click(screen.getByRole('button', { name: /choose variant/i }));
+  fireEvent.click(screen.getByRole('menuitemradio', { name: /bracket\.3mf/i }));
   const secondDownload = screen.getByRole('link', { name: /download bracket\.3mf/i });
   expect(secondDownload).toHaveAttribute('href', '/files/m1/f2');
   expect(secondDownload).toHaveAttribute('download', 'bracket.3mf');
+});
+
+test('detail places a visual variant picker below the selected download and updates the preview', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  const firstFile = { ...model.files[0], thumbPath: 'thumbs/f1.png' };
+  const secondFile = { ...model.files[0], id: 'f2', filename: 'bracket.3mf', relPath: 'files/bracket.3mf', format: '3mf', thumbPath: 'thumbs/f2.png' };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/models/m1')) return Response.json({ ...model, files: [firstFile, secondFile] });
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  const actions = await screen.findByRole('group', { name: 'Selected variant' });
+  const firstDownload = within(actions).getByRole('link', { name: /download cube\.stl/i });
+  const picker = within(actions).getByRole('button', { name: /choose variant/i });
+  const viewer = document.querySelector<HTMLElement>('.viewer');
+  expect(viewer).not.toBeNull();
+  expect(firstDownload.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(viewer!).getByRole('img', { name: 'cube.stl preview' })).toHaveAttribute('src', '/thumbs/m1/f1.png');
+
+  fireEvent.click(picker);
+  const menu = screen.getByRole('menu', { name: 'Variants' });
+  expect(within(menu).getByRole('img', { name: 'cube.stl preview' })).toHaveAttribute('src', '/thumbs/m1/f1.png');
+  expect(within(menu).getByRole('img', { name: 'bracket.3mf preview' })).toHaveAttribute('src', '/thumbs/m1/f2.png');
+  fireEvent.click(within(menu).getByRole('menuitemradio', { name: /bracket\.3mf/i }));
+
+  expect(within(actions).getByRole('link', { name: /download bracket\.3mf/i })).toHaveAttribute('href', '/files/m1/f2');
+  expect(within(viewer!).getByRole('img', { name: 'bracket.3mf preview' })).toHaveAttribute('src', '/thumbs/m1/f2.png');
 });
 
 test('collection detail supports metadata, cover, ordering, and deletion', async () => {
