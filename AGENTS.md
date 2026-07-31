@@ -320,10 +320,12 @@ Stable releases are tag-driven:
 
 1. start from clean, synced `main`
 2. choose a SemVer tag in the form `vX.Y.Z`
-3. create and push the tag only with explicit publication approval
-4. `.github/workflows/release.yml` builds `linux/amd64` and `linux/arm64`
-5. GHCR receives version, major/minor, major, and `latest` tags
-6. the workflow publishes provenance, an SBOM, and a generated GitHub release
+3. for `vX.Y.0`, copy `.github/release-notes/TEMPLATE.md` to `.github/release-notes/vX.Y.0.md`, complete the detailed notes, and run the documented validation command
+4. for `vX.Y.Z` where `Z > 0`, preview GitHub's generated notes; the workflow will publish the concise patch format automatically
+5. create and push the tag only with explicit publication approval
+6. `.github/workflows/release.yml` validates the release-note policy, then builds `linux/amd64` and `linux/arm64`
+7. GHCR receives version, major/minor, major, and `latest` tags
+8. the workflow publishes provenance, an SBOM, and the standardized GitHub release
 
 After tagging, do not report success until all of these are verified:
 
