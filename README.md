@@ -3,9 +3,11 @@
 **Your 3D files, organized.**
 
 > [!WARNING]
-> Fileament is in the early stages of development. Until this notice is removed, releases may include breaking changes to configuration, storage, the API, or deployment. Back up your data and review the release notes before updating.
+> Fileament is in the early stages of development and has been built with the assistance LLMs. Until this notice is removed, releases may include breaking changes to configuration, storage, the API, or deployment. Back up your data and review the release notes before updating.
 
 Fileament is a self-hosted library for organizing 3D-printing files. Upload models, browse them with thumbnails and a built-in 3D viewer, group them into collections, and create read-only share links without handing your library to a third-party service.
+
+<img width="989" height="607" alt="Screenshot 2026-07-30 at 10 23 51 PM" src="https://github.com/user-attachments/assets/893019aa-f27b-4c96-b858-af5f3f7a7aee" />
 
 It runs as a single container with one persistent `/data` volume. The production image contains one standalone Go executable with the complete web interface embedded.
 
