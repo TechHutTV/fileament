@@ -72,9 +72,9 @@ test('offers minimal click controls for zooming and resetting the fitted view', 
   render(<ModelViewer file={{ id: 'f1', modelId: 'm1', filename: 'cube.stl', relPath: 'files/cube.stl', format: 'stl', sizeBytes: 1, triangleCount: 1, bboxX: 1, bboxY: 1, bboxZ: 1 }} url="/mesh/m1/f1" />);
 
   fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-  expect(viewerControls.orbit.dollyIn).toHaveBeenCalled();
+  expect(viewerControls.orbit.dollyOut).toHaveBeenCalledWith(1.2);
   fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
-  expect(viewerControls.orbit.dollyOut).toHaveBeenCalled();
+  expect(viewerControls.orbit.dollyIn).toHaveBeenCalledWith(1.2);
   fireEvent.click(screen.getByRole('button', { name: 'Reset view' }));
   expect(viewerControls.bounds.refresh).toHaveBeenCalled();
   expect(viewerControls.bounds.clip).toHaveBeenCalled();
