@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
-import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 
@@ -633,24 +633,39 @@ function SectionHeading({ icon, title, description }: { icon: ReactNode; title: 
 function VariantPicker({ files, selectedFileID, onSelect, thumbnailURL }: { files: ModelFile[]; selectedFileID: string; onSelect: (fileID: string) => void; thumbnailURL: (file: ModelFile) => string }) {
   const [open, setOpen] = useState(false);
   const picker = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const options = useRef<Array<HTMLButtonElement | null>>([]);
   const selected = files.find((file) => file.id === selectedFileID) ?? files[0];
+  const selectedIndex = Math.max(0, files.findIndex((file) => file.id === selected?.id));
   useEffect(() => {
     if (!open) return undefined;
+    const focus = window.setTimeout(() => options.current[selectedIndex]?.focus(), 0);
     const close = (event: PointerEvent) => { if (!picker.current?.contains(event.target as Node)) setOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
     document.addEventListener('pointerdown', close);
-    document.addEventListener('keydown', escape);
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', escape); };
-  }, [open]);
+    return () => { window.clearTimeout(focus); document.removeEventListener('pointerdown', close); };
+  }, [open, selectedIndex]);
   if (!selected) return null;
-  return <div className={`variant-picker${open ? ' open' : ''}`} ref={picker}>
+  const closeAndFocusTrigger = () => { setOpen(false); trigger.current?.focus(); };
+  const moveFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const current = options.current.findIndex((option) => option === document.activeElement);
+    let next = current;
+    if (event.key === 'ArrowDown') next = (current + 1) % files.length;
+    else if (event.key === 'ArrowUp') next = (current - 1 + files.length) % files.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = files.length - 1;
+    else if (event.key === 'Escape') { event.preventDefault(); closeAndFocusTrigger(); return; }
+    else return;
+    event.preventDefault();
+    options.current[next]?.focus();
+  };
+  return <div className={`variant-picker${open ? ' open' : ''}`} ref={picker} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false); }}>
     <span className="variant-picker-label">Variation</span>
-    <button type="button" className="variant-picker-trigger" aria-label={`Choose variant, currently ${selected.filename}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+    <button ref={trigger} type="button" className="variant-picker-trigger" aria-label={`Choose variant, currently ${selected.filename}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
       <VariantPreview file={selected} src={thumbnailURL(selected)} />
       <ChevronDown size={18} aria-hidden />
     </button>
-    {open && <div className="variant-menu" role="menu" aria-label="Variants">
-      {files.map((file) => <button type="button" role="menuitemradio" aria-checked={file.id === selected.id} className={file.id === selected.id ? 'selected' : ''} key={file.id} onClick={() => { onSelect(file.id); setOpen(false); }}>
+    {open && <div className="variant-menu" role="menu" aria-label="Variants" onKeyDown={moveFocus}>
+      {files.map((file, index) => <button ref={(option) => { options.current[index] = option; }} type="button" role="menuitemradio" aria-checked={file.id === selected.id} className={file.id === selected.id ? 'selected' : ''} key={file.id} onClick={() => { onSelect(file.id); closeAndFocusTrigger(); }}>
         <VariantPreview file={file} src={thumbnailURL(file)} />
         {file.id === selected.id && <Check size={17} aria-hidden />}
       </button>)}
@@ -659,7 +674,7 @@ function VariantPicker({ files, selectedFileID, onSelect, thumbnailURL }: { file
 }
 
 function VariantPreview({ file, src }: { file: ModelFile; src: string }) {
-  return <><span className="variant-preview">{src ? <img src={src} alt={`${file.filename} preview`} loading="lazy" /> : <Box size={22} aria-hidden />}</span><span className="variant-copy"><strong>{file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></>;
+  return <><span className="variant-preview">{src ? <img src={src} alt="" loading="lazy" /> : <Box size={22} aria-hidden />}</span><span className="variant-copy"><strong>{file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></>;
 }
 
 function EmptyState({ icon, title, text, compact = false }: { icon: ReactNode; title: string; text: string; compact?: boolean }) {

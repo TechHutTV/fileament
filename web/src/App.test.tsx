@@ -14,6 +14,18 @@ const model = {
   tags: ['tools'],
 };
 
+function stubVariantDetail() {
+  const firstFile = { ...model.files[0], thumbPath: 'thumbs/f1.png' };
+  const secondFile = { ...model.files[0], id: 'f2', filename: 'bracket.3mf', relPath: 'files/bracket.3mf', format: '3mf', thumbPath: 'thumbs/f2.png' };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/models/m1')) return Response.json({ ...model, files: [firstFile, secondFile] });
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+}
+
 beforeEach(() => {
   window.history.pushState({}, '', '/');
   vi.stubGlobal('EventSource', class {
@@ -609,15 +621,7 @@ test('detail uses consistent variant terminology and promotes the selected downl
 
 test('detail places a visual variant picker below the selected download and updates the preview', async () => {
   window.history.pushState({}, '', '/models/m1');
-  const firstFile = { ...model.files[0], thumbPath: 'thumbs/f1.png' };
-  const secondFile = { ...model.files[0], id: 'f2', filename: 'bracket.3mf', relPath: 'files/bracket.3mf', format: '3mf', thumbPath: 'thumbs/f2.png' };
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
-    if (url.includes('/api/models/m1')) return Response.json({ ...model, files: [firstFile, secondFile] });
-    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
-    return Response.json({});
-  }));
+  stubVariantDetail();
   renderApp();
 
   const actions = await screen.findByRole('group', { name: 'Selected variant' });
@@ -630,12 +634,46 @@ test('detail places a visual variant picker below the selected download and upda
 
   fireEvent.click(picker);
   const menu = screen.getByRole('menu', { name: 'Variants' });
-  expect(within(menu).getByRole('img', { name: 'cube.stl preview' })).toHaveAttribute('src', '/thumbs/m1/f1.png');
-  expect(within(menu).getByRole('img', { name: 'bracket.3mf preview' })).toHaveAttribute('src', '/thumbs/m1/f2.png');
+  const thumbnails = menu.querySelectorAll('img');
+  expect(thumbnails).toHaveLength(2);
+  expect(thumbnails[0]).toHaveAttribute('src', '/thumbs/m1/f1.png');
+  expect(thumbnails[0]).toHaveAttribute('alt', '');
+  expect(thumbnails[1]).toHaveAttribute('src', '/thumbs/m1/f2.png');
+  expect(thumbnails[1]).toHaveAttribute('alt', '');
   fireEvent.click(within(menu).getByRole('menuitemradio', { name: /bracket\.3mf/i }));
 
   expect(within(actions).getByRole('link', { name: /download bracket\.3mf/i })).toHaveAttribute('href', '/files/m1/f2');
   expect(within(viewer!).getByRole('img', { name: 'bracket.3mf preview' })).toHaveAttribute('src', '/thumbs/m1/f2.png');
+});
+
+test('variant picker supports keyboard navigation and restores trigger focus', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  stubVariantDetail();
+  renderApp();
+
+  const trigger = await screen.findByRole('button', { name: /choose variant/i });
+  fireEvent.click(trigger);
+  let menu = screen.getByRole('menu', { name: 'Variants' });
+  let options = within(menu).getAllByRole('menuitemradio');
+  await waitFor(() => expect(options[0]).toHaveFocus());
+
+  fireEvent.keyDown(options[0], { key: 'ArrowDown' });
+  expect(options[1]).toHaveFocus();
+  fireEvent.keyDown(options[1], { key: 'Home' });
+  expect(options[0]).toHaveFocus();
+  fireEvent.keyDown(options[0], { key: 'End' });
+  expect(options[1]).toHaveFocus();
+  fireEvent.keyDown(options[1], { key: 'Escape' });
+  expect(screen.queryByRole('menu', { name: 'Variants' })).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+
+  fireEvent.click(trigger);
+  menu = screen.getByRole('menu', { name: 'Variants' });
+  options = within(menu).getAllByRole('menuitemradio');
+  await waitFor(() => expect(options[0]).toHaveFocus());
+  fireEvent.click(options[1]);
+  expect(screen.queryByRole('menu', { name: 'Variants' })).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
 });
 
 test('collection detail supports metadata, cover, ordering, and deletion', async () => {
