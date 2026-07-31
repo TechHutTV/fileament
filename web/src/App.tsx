@@ -263,7 +263,7 @@ function UploadPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [collectionID, setCollectionID] = useState('');
-  const [organization, setOrganization] = useState<UploadOrganization>('separate');
+  const [organization, setOrganization] = useState<UploadOrganization | ''>('');
   const [groupedTitle, setGroupedTitle] = useState('');
   const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const collectionItems = Array.isArray(collections.data) ? collections.data : [];
@@ -272,6 +272,7 @@ function UploadPage() {
   const pending = useRef(new Set<string>());
   const cancelled = useRef(new Set<string>());
   const uploadChain = useRef<Promise<void>>(Promise.resolve());
+  const organizationSelected = organization !== '';
 
   const updateItem = (key: string, update: Partial<UploadItem>) => {
     setItems((current) => current.map((item) => item.key === key ? { ...item, ...update } : item));
@@ -339,6 +340,7 @@ function UploadPage() {
   };
 
   const addFiles = (files: FileList | File[]) => {
+    if (!organization) return;
     const selected = Array.from(files);
     const loose = selected.filter((file) => !file.name.toLowerCase().endsWith('.zip'));
     const groupedLoose = organization === 'grouped' && loose.length > 1;
@@ -419,7 +421,7 @@ function UploadPage() {
       <div className="upload-organization-options">
         <label className={organization === 'separate' ? 'selected' : ''}>
           <input type="radio" name="upload-organization" value="separate" checked={organization === 'separate'} onChange={() => setOrganization('separate')} />
-          <span><strong>Separate models</strong><small>Default · one library model per loose file</small></span>
+          <span><strong>Separate models</strong><small>One library model per loose file</small></span>
         </label>
         <label className={organization === 'grouped' ? 'selected' : ''}>
           <input type="radio" name="upload-organization" value="grouped" checked={organization === 'grouped'} onChange={() => setOrganization('grouped')} />
@@ -427,7 +429,7 @@ function UploadPage() {
         </label>
       </div>
       {organization === 'grouped' && <label className="grouped-model-title"><span>Model name <small>Optional</small></span><input aria-label="Grouped model name" value={groupedTitle} placeholder="Uses the first variant name" onChange={(event) => setGroupedTitle(event.target.value)} /></label>}
-      <small className="upload-organization-note">This choice applies only to loose STL, OBJ, and 3MF files. Every ZIP remains its own model.</small>
+      <small className="upload-organization-note">Choose an option before adding files. This applies only to loose STL, OBJ, and 3MF files; every ZIP remains its own model.</small>
     </fieldset>
     <label className="upload-collection">
       <span className="upload-collection-icon"><Folder size={20} /></span>
@@ -438,21 +440,22 @@ function UploadPage() {
       </select>
     </label>
     <div
-      className={`upload-dropzone${dragging ? ' dragging' : ''}`}
+      className={`upload-dropzone${dragging ? ' dragging' : ''}${organizationSelected ? '' : ' disabled'}`}
       role="button"
-      tabIndex={0}
-      aria-label="Drop 3D files or choose files"
-      onClick={() => input.current?.click()}
-      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); input.current?.click(); } }}
-      onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+      tabIndex={organizationSelected ? 0 : -1}
+      aria-disabled={!organizationSelected}
+      aria-label={organizationSelected ? 'Drop 3D files or choose files' : 'Choose file organization before adding files'}
+      onClick={() => { if (organizationSelected) input.current?.click(); }}
+      onKeyDown={(event) => { if (organizationSelected && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); input.current?.click(); } }}
+      onDragEnter={(event) => { event.preventDefault(); if (organizationSelected) setDragging(true); }}
+      onDragOver={(event) => { event.preventDefault(); if (organizationSelected) setDragging(true); }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }}
-      onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}
+      onDrop={(event) => { event.preventDefault(); setDragging(false); if (organizationSelected) addFiles(event.dataTransfer.files); }}
     >
-      <input ref={input} className="visually-hidden" type="file" multiple accept=".stl,.obj,.3mf,.zip" aria-label="Choose 3D files" onChange={(event) => { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }} />
+      <input ref={input} className="visually-hidden" type="file" multiple accept=".stl,.obj,.3mf,.zip" aria-label="Choose 3D files" disabled={!organizationSelected} onChange={(event) => { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }} />
       <span className="dropzone-icon"><Upload size={28} /></span>
-      <strong>{dragging ? 'Drop to start uploading' : 'Drop 3D files here'}</strong>
-      <span>or click to browse your files</span>
+      <strong>{!organizationSelected ? 'Choose file organization first' : dragging ? 'Drop to start uploading' : 'Drop 3D files here'}</strong>
+      <span>{organizationSelected ? 'or click to browse your files' : 'Select one of the options above to enable uploads'}</span>
       <small>STL, OBJ, 3MF, and ZIP bundles</small>
     </div>
     {items.length > 0 && <section className="upload-queue" aria-live="polite">

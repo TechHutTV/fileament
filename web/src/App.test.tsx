@@ -79,7 +79,7 @@ test('manages a dropped multi-model upload queue', async () => {
   }));
   renderApp();
 
-  expect(await screen.findByRole('radio', { name: /separate models/i })).toBeChecked();
+  await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   expect(screen.getByLabelText(/choose 3d files/i)).toHaveAttribute('multiple');
   const cube = new File(['solid cube'], 'cube.stl', { type: 'model/stl' });
@@ -96,6 +96,46 @@ test('manages a dropped multi-model upload queue', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: /finish and view library/i }));
   expect(window.location.pathname).toBe('/');
+});
+
+test('requires loose file organization before files can be selected', async () => {
+  window.history.pushState({}, '', '/upload');
+  const uploads: { path: string; files: string[] }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([]);
+    if ((url === '/api/models' || url === '/api/models/grouped') && init?.method === 'POST') {
+      const body = init.body as FormData;
+      const files = url.endsWith('/grouped')
+        ? body.getAll('files').map((entry) => (entry as File).name)
+        : [((body.get('file')) as File).name];
+      uploads.push({ path: url, files });
+      return Response.json({ ...model, id: 'grouped-model', title: 'Grouped model', primaryThumb: 'card.png' }, { status: 201 });
+    }
+    return Response.json({});
+  }));
+  renderApp();
+
+  const separate = await screen.findByRole('radio', { name: /separate models/i });
+  const grouped = screen.getByRole('radio', { name: /one model with variants/i });
+  const input = screen.getByLabelText(/choose 3d files/i);
+  const dropzone = screen.getByRole('button', { name: /choose file organization before adding files/i });
+  expect(separate).not.toBeChecked();
+  expect(grouped).not.toBeChecked();
+  expect(input).toBeDisabled();
+  expect(dropzone).toHaveAttribute('aria-disabled', 'true');
+
+  const files = [new File(['a'], 'baseplate-2x2.stl'), new File(['b'], 'baseplate-3x3.stl')];
+  fireEvent.drop(dropzone, { dataTransfer: { files } });
+  expect(uploads).toEqual([]);
+
+  fireEvent.click(grouped);
+  expect(input).toBeEnabled();
+  expect(dropzone).toHaveAttribute('aria-disabled', 'false');
+  fireEvent.drop(dropzone, { dataTransfer: { files } });
+
+  await waitFor(() => expect(uploads).toEqual([{ path: '/api/models/grouped', files: ['baseplate-2x2.stl', 'baseplate-3x3.stl'] }]));
 });
 
 test('creates one atomic model when loose files are grouped as variants', async () => {
@@ -190,6 +230,7 @@ test('adds uploaded models to the selected collection', async () => {
   await screen.findByRole('option', { name: 'Fixtures' });
   fireEvent.change(collection, { target: { value: 'c1' } });
   expect(collection).toHaveValue('c1');
+  await chooseSeparateModels();
   fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl'), new File(['b'], 'bracket.stl')] } });
 
   await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
@@ -218,6 +259,7 @@ test('refreshes collections after removing an assigned upload', async () => {
   const collection = await screen.findByLabelText('Add uploads to collection');
   await screen.findByRole('option', { name: 'Fixtures' });
   fireEvent.change(collection, { target: { value: 'c1' } });
+  await chooseSeparateModels();
   fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl')] } });
   await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
   await waitFor(() => expect(collectionFetches).toBe(2));
@@ -247,6 +289,7 @@ test('cleans up a model cancelled while collection assignment is in flight', asy
   const collection = await screen.findByLabelText('Add uploads to collection');
   await screen.findByRole('option', { name: 'Fixtures' });
   fireEvent.change(collection, { target: { value: 'c1' } });
+  await chooseSeparateModels();
   fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl')] } });
   await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
 
@@ -277,6 +320,7 @@ test('serializes automatic uploads to avoid concurrent database writes', async (
   }));
   renderApp();
 
+  await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.stl'), new File(['b'], 'second.stl')] } });
 
@@ -307,6 +351,7 @@ test('reconciles a thumbnail event that arrives before the upload response', asy
   }));
   renderApp();
 
+  await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['race'], 'race.stl')] } });
   await screen.findByText('Uploading');
@@ -340,6 +385,7 @@ test('keeps a cancelled upload visible when server cleanup fails', async () => {
   }));
   renderApp();
 
+  await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['solid delayed'], 'delayed.stl')] } });
   fireEvent.click(await screen.findByRole('button', { name: 'Cancel delayed.stl upload' }));
@@ -375,6 +421,7 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
   }));
   const view = renderApp();
 
+  await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'active.stl'), new File(['b'], 'queued.stl')] } });
   await waitFor(() => expect(uploads).toEqual(['active.stl']));
@@ -599,4 +646,8 @@ test('public collection cards select models within the same share and use token 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+}
+
+async function chooseSeparateModels() {
+  fireEvent.click(await screen.findByRole('radio', { name: /separate models/i }));
 }

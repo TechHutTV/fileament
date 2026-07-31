@@ -102,7 +102,7 @@ environment:
 
 ### Upload models
 
-The upload screen supports loose STL, OBJ, and 3MF files plus ZIP archives. Upload files separately to create one model per upload, or use grouped mode to keep several mesh variants under one model.
+The upload screen supports loose STL, OBJ, and 3MF files plus ZIP archives. Choose **Separate models** to create one model per loose file or **One model with variants** to keep several meshes under one model. File selection stays disabled until one of these organization modes is selected.
 
 ZIP processing rejects unsafe paths and common junk files. Uploads are streamed into the persistent data volume instead of being buffered in memory.
 
