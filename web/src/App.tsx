@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
@@ -204,6 +204,13 @@ function Detail({ id }: { id: string }) {
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
   const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
   const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => navigate('/') });
+  const renameFile = useMutation<Model, Error, { fid: string; filename: string }>({
+    mutationFn: ({ fid, filename }) => api(`/api/models/${id}/files/${fid}`, { method: 'PATCH', body: JSON.stringify({ filename }) }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['model', id], updated);
+      qc.invalidateQueries({ queryKey: ['models'] });
+    },
+  });
   const deleteFile = useMutation({ mutationFn: (fid: string) => api(`/api/models/${id}/files/${fid}`, { method: 'DELETE' }), onSuccess: invalidate });
   const deleteImage = useMutation({ mutationFn: (imageID: string) => api(`/api/models/${id}/images/${imageID}`, { method: 'DELETE' }), onSuccess: invalidate });
   const setThumb = useMutation({ mutationFn: (fileId: string) => api(`/api/models/${id}/thumb`, { method: 'PUT', body: JSON.stringify({ fileId }) }), onSuccess: invalidate });
@@ -225,7 +232,7 @@ function Detail({ id }: { id: string }) {
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Variants and downloads</h2>
-        {model.files.map((f) => <div className="file model-file" key={f.id}><div className="model-file-copy"><a href={`/files/${model.id}/${f.id}`}><Download size={16} /><span>{f.filename}</span></a><small>{f.triangleCount} tris · {dims(f)} · {formatBytes(f.sizeBytes)}</small></div><div className="model-file-actions"><button type="button" className="icon" title="Use thumbnail" onClick={() => setThumb.mutate(f.id)}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" onClick={() => deleteFile.mutate(f.id)}><Trash2 size={16} /></button></div></div>)}
+        {model.files.map((f) => <ModelFileRow key={f.id} modelID={model.id} file={f} busy={renameFile.isPending} onRename={async (filename) => { await renameFile.mutateAsync({ fid: f.id, filename }); }} onUseThumbnail={() => setThumb.mutate(f.id)} onDelete={() => deleteFile.mutate(f.id)} />)}
         <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
         <div className="images">{model.images?.map((img) => <figure key={img.id}><img src={`/images/${model.id}/${img.id}`} alt={`${model.title} image`} /><button type="button" className="icon danger" onClick={() => deleteImage.mutate(img.id)}><X size={16} /></button></figure>)}</div>
@@ -239,6 +246,39 @@ function Detail({ id }: { id: string }) {
       </aside>
     </section>
   );
+}
+
+function ModelFileRow({ modelID, file, busy, onRename, onUseThumbnail, onDelete }: { modelID: string; file: ModelFile; busy: boolean; onRename: (filename: string) => Promise<void>; onUseThumbnail: () => void; onDelete: () => void }) {
+  const extension = `.${file.format}`;
+  const initialName = file.filename.toLowerCase().endsWith(extension) ? file.filename.slice(0, -extension.length) : file.filename;
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(initialName);
+  const [error, setError] = useState('');
+  const startEditing = () => {
+    setName(initialName);
+    setError('');
+    setEditing(true);
+  };
+  const cancelEditing = () => {
+    setName(initialName);
+    setError('');
+    setEditing(false);
+  };
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Enter a variation name.');
+      return;
+    }
+    setError('');
+    try {
+      await onRename(`${trimmed}${extension}`);
+      setEditing(false);
+    } catch {
+      setError('Could not rename this variation. Try again.');
+    }
+  };
+  return <div className={`file model-file${editing ? ' editing' : ''}`}><div className="model-file-copy">{editing ? <form className="model-file-rename" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="model-file-rename-field"><input autoFocus required maxLength={255 - extension.length} aria-label={`Variation name for ${file.filename}`} value={name} onChange={(event) => setName(event.target.value)} /><span className="model-file-extension">{extension}</span></div><div className="model-file-rename-actions"><button type="submit" className="icon" aria-label="Save variation name" title="Save" disabled={busy || !name.trim()}><Check size={16} /></button><button type="button" className="icon" aria-label="Cancel renaming" title="Cancel" disabled={busy} onClick={cancelEditing}><X size={16} /></button></div>{error && <p className="model-file-rename-error" role="alert">{error}</p>}</form> : <a href={`/files/${modelID}/${file.id}`}><Download size={16} /><span>{file.filename}</span></a>}<small>{file.triangleCount} tris · {dims(file)} · {formatBytes(file.sizeBytes)}</small></div>{!editing && <div className="model-file-actions"><button type="button" className="icon" aria-label={`Rename ${file.filename}`} title="Rename file" disabled={busy} onClick={startEditing}><Pencil size={16} /></button><button type="button" className="icon" title="Use thumbnail" disabled={busy} onClick={onUseThumbnail}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" disabled={busy} onClick={onDelete}><Trash2 size={16} /></button></div>}</div>;
 }
 
 function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<Model>) => void }) {

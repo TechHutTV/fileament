@@ -92,6 +92,111 @@ func TestCatalogListSearchDetailPatchAndAssets(t *testing.T) {
 	}
 }
 
+func TestRenameModelFileIsDurable(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	model := uploadSTLModel(t, app, cookie, "gear.stl", "Gear model")
+	file := model.Files[0]
+	if _, err := app.db.Exec(`CREATE TRIGGER preserve_model_change_during_file_rename AFTER UPDATE OF filename ON files BEGIN UPDATE models SET author = 'Preserved Author' WHERE id = NEW.model_id; END`); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/models/"+model.ID+"/files/"+file.ID, strings.NewReader(`{"filename":"drive-gear.stl"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var renamed Model
+	if err := json.Unmarshal(rec.Body.Bytes(), &renamed); err != nil {
+		t.Fatal(err)
+	}
+	if len(renamed.Files) != 1 || renamed.Files[0].Filename != "drive-gear.stl" || renamed.Files[0].RelPath != file.RelPath || renamed.Author != "Preserved Author" {
+		t.Fatalf("unexpected renamed model %#v", renamed)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/files/"+model.ID+"/"+file.ID, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Disposition"), `filename="drive-gear.stl"`) {
+		t.Fatalf("download status=%d disposition=%q", rec.Code, rec.Header().Get("Content-Disposition"))
+	}
+
+	sidecar, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "model.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sidecar), `"filename": "drive-gear.stl"`) || !strings.Contains(string(sidecar), `"author": "Preserved Author"`) {
+		t.Fatalf("renamed filename missing from sidecar: %s", sidecar)
+	}
+
+	cfg := app.cfg
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-shm", "-wal"} {
+		if err := os.Remove(filepath.Join(cfg.DataDir, "fileament.db") + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	rebuilt, err := New(cfg, os.DirFS(cfg.WebDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rebuilt.Close() })
+	recovered, err := rebuilt.getModel(model.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered.Files) != 1 || recovered.Files[0].Filename != "drive-gear.stl" || recovered.Files[0].RelPath != file.RelPath || recovered.Author != "Preserved Author" {
+		t.Fatalf("unexpected rebuilt model %#v", recovered)
+	}
+}
+
+func TestRenameModelFileRejectsUnsafeNames(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	cases := []struct {
+		name     string
+		filename string
+	}{
+		{"empty", ""},
+		{"extension only", ".stl"},
+		{"traversal", "../gear.stl"},
+		{"wrong extension", "gear.obj"},
+		{"control character", "gear\r\n.stl"},
+		{"quote", `gear".stl`},
+		{"too long", strings.Repeat("a", 252) + ".stl"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := uploadSTLModel(t, app, cookie, "gear.stl", "Gear model")
+			body, err := json.Marshal(map[string]string{"filename": tc.filename})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPatch, "/api/models/"+model.ID+"/files/"+model.Files[0].ID, strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			app.Router().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("rename status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			stored, err := app.getModel(model.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Files[0].Filename != "gear.stl" {
+				t.Fatalf("unsafe filename persisted as %q", stored.Files[0].Filename)
+			}
+		})
+	}
+}
+
 func TestCatalogPaginationUsesTheSelectedSortKey(t *testing.T) {
 	app := newAuthedTestApp(t)
 	cookie := loginCookie(t, app, "password-password")

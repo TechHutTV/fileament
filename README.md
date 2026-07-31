@@ -114,7 +114,7 @@ Use tags for flexible filtering and collections for curated groups. Collections 
 
 ### Preview and download
 
-Supported meshes can be opened in the browser viewer. Files larger than 50 MB wait for manual confirmation before loading to avoid freezing the browser. Original files remain available for download.
+Supported meshes can be opened in the browser viewer. Files larger than 50 MB wait for manual confirmation before loading to avoid freezing the browser. Original files remain available for download, and each variation can be renamed inline without changing its file format.
 
 ### Share models and collections
 
