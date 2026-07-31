@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
-import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 
@@ -200,6 +200,7 @@ function Detail({ id }: { id: string }) {
   useEffect(() => { if (model?.files?.[0] && !selectedFileID) setSelectedFileID(model.files[0].id); }, [model, selectedFileID]);
   const file = model?.files.find((f) => f.id === selectedFileID) ?? model?.files?.[0];
   const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
+  const previewThumb = fileThumbName(file) || model?.primaryThumb;
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
   const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
   const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => navigate('/') });
@@ -212,16 +213,18 @@ function Detail({ id }: { id: string }) {
   return (
     <section className="detail">
       <div className="viewer">
-        {file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/thumbs/${model.id}/${model.primaryThumb}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
+        {file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer key={file.id} file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense> : <div className="static-thumb">{previewThumb ? <img src={`/thumbs/${model.id}/${previewThumb}`} alt={`${file?.filename ?? model.title} preview`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
       </div>
       <aside className="panel">
-        {file && <a className="model-download-primary" href={`/files/${model.id}/${file.id}`} download={file.filename}><span className="model-download-icon"><Download size={22} /></span><span className="model-download-copy"><strong>Download {file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></a>}
+        {file && <div className="selected-variant-actions" role="group" aria-label="Selected variant">
+          <a className="model-download-primary" href={`/files/${model.id}/${file.id}`} download={file.filename}><span className="model-download-icon"><Download size={22} /></span><span className="model-download-copy"><strong>Download {file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></a>
+          {model.files.length > 1 && <VariantPicker files={model.files} selectedFileID={file.id} onSelect={(fileID) => { setSelectedFileID(fileID); setForceViewer(false); }} thumbnailURL={(variant) => { const thumb = fileThumbName(variant); return thumb ? `/thumbs/${model.id}/${thumb}` : ''; }} />}
+        </div>}
         <ModelEditor model={model} onSave={(body) => patch.mutate(body)} />
         <Markdown text={model.description} />
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Variants and downloads</h2>
-        <Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />
         {model.files.map((f) => <div className="file model-file" key={f.id}><div className="model-file-copy"><a href={`/files/${model.id}/${f.id}`}><Download size={16} /><span>{f.filename}</span></a><small>{f.triangleCount} tris · {dims(f)} · {formatBytes(f.sizeBytes)}</small></div><div className="model-file-actions"><button type="button" className="icon" title="Use thumbnail" onClick={() => setThumb.mutate(f.id)}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" onClick={() => deleteFile.mutate(f.id)}><Trash2 size={16} /></button></div></div>)}
         <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
@@ -627,12 +630,63 @@ function SectionHeading({ icon, title, description }: { icon: ReactNode; title: 
   return <header className="section-heading"><span className="surface-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header>;
 }
 
+function VariantPicker({ files, selectedFileID, onSelect, thumbnailURL }: { files: ModelFile[]; selectedFileID: string; onSelect: (fileID: string) => void; thumbnailURL: (file: ModelFile) => string }) {
+  const [open, setOpen] = useState(false);
+  const picker = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const options = useRef<Array<HTMLButtonElement | null>>([]);
+  const selected = files.find((file) => file.id === selectedFileID) ?? files[0];
+  const selectedIndex = Math.max(0, files.findIndex((file) => file.id === selected?.id));
+  useEffect(() => {
+    if (!open) return undefined;
+    const focus = window.setTimeout(() => options.current[selectedIndex]?.focus(), 0);
+    const close = (event: PointerEvent) => { if (!picker.current?.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => { window.clearTimeout(focus); document.removeEventListener('pointerdown', close); };
+  }, [open, selectedIndex]);
+  if (!selected) return null;
+  const closeAndFocusTrigger = () => { setOpen(false); trigger.current?.focus(); };
+  const moveFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const current = options.current.findIndex((option) => option === document.activeElement);
+    let next = current;
+    if (event.key === 'ArrowDown') next = (current + 1) % files.length;
+    else if (event.key === 'ArrowUp') next = (current - 1 + files.length) % files.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = files.length - 1;
+    else if (event.key === 'Escape') { event.preventDefault(); closeAndFocusTrigger(); return; }
+    else return;
+    event.preventDefault();
+    options.current[next]?.focus();
+  };
+  return <div className={`variant-picker${open ? ' open' : ''}`} ref={picker} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false); }}>
+    <span className="variant-picker-label">Variation</span>
+    <button ref={trigger} type="button" className="variant-picker-trigger" aria-label={`Choose variant, currently ${selected.filename}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <VariantPreview file={selected} src={thumbnailURL(selected)} />
+      <ChevronDown size={18} aria-hidden />
+    </button>
+    {open && <div className="variant-menu" role="menu" aria-label="Variants" onKeyDown={moveFocus}>
+      {files.map((file, index) => <button ref={(option) => { options.current[index] = option; }} type="button" role="menuitemradio" aria-checked={file.id === selected.id} className={file.id === selected.id ? 'selected' : ''} key={file.id} onClick={() => { onSelect(file.id); closeAndFocusTrigger(); }}>
+        <VariantPreview file={file} src={thumbnailURL(file)} />
+        {file.id === selected.id && <Check size={17} aria-hidden />}
+      </button>)}
+    </div>}
+  </div>;
+}
+
+function VariantPreview({ file, src }: { file: ModelFile; src: string }) {
+  return <><span className="variant-preview">{src ? <img src={src} alt="" loading="lazy" /> : <Box size={22} aria-hidden />}</span><span className="variant-copy"><strong>{file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></>;
+}
+
 function EmptyState({ icon, title, text, compact = false }: { icon: ReactNode; title: string; text: string; compact?: boolean }) {
   return <div className={`empty-state${compact ? ' compact' : ''}`}><span className="empty-state-icon">{icon}</span><h2>{title}</h2><p>{text}</p></div>;
 }
 
 function Select({ label, value, onChange, options, compact = false }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][]; compact?: boolean }) {
   return <label className={`select${compact ? ' compact-select' : ''}`}><span className={compact ? 'visually-hidden' : undefined}>{label}</span><select aria-label={compact ? label : undefined} value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v, text]) => <option value={v} key={v}>{text}</option>)}</select></label>;
+}
+
+function fileThumbName(file?: ModelFile) {
+  return file?.thumbPath?.split('/').pop() ?? '';
 }
 
 function Empty({ text }: { text: string }) {
