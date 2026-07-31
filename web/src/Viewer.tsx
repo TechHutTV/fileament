@@ -17,7 +17,8 @@ export default function ModelViewer({ file, url }: { file: ModelFile; url: strin
   const edgeColor = useMemo(() => `#${new Color(modelColor).multiplyScalar(0.45).getHexString()}`, [modelColor]);
   const zoom = (direction: 'in' | 'out') => {
     if (!controls.current) return;
-    controls.current[direction === 'in' ? 'dollyIn' : 'dollyOut'](1.2);
+    // three-stdlib's dollyOut divides the radius scale, moving perspective cameras closer.
+    controls.current[direction === 'in' ? 'dollyOut' : 'dollyIn'](1.2);
     controls.current.update();
   };
   return (
