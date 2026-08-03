@@ -555,6 +555,74 @@ test('persists the selected model color from settings', async () => {
   expect(localStorage.getItem('fileament-model-color')).toBe('#4f7fb5');
 });
 
+test('creates and downloads a sensitive Fileament backup from settings', async () => {
+  window.history.pushState({}, '', '/settings');
+  const calls: string[] = [];
+  const createObjectURL = vi.fn(() => 'blob:fileament-backup');
+  const revokeObjectURL = vi.fn();
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+  vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 2048 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    if (url === '/api/backups' && init?.method === 'POST') return new Response('backup bytes', { headers: { 'Content-Disposition': 'attachment; filename="fileament-backup-test.fileament"' } });
+    return Response.json({});
+  }));
+  renderApp();
+
+  fireEvent.click(await screen.findByRole('button', { name: /create and download backup/i }));
+  await waitFor(() => expect(calls).toContain('POST /api/backups'));
+  expect(createObjectURL).toHaveBeenCalled();
+  expect(click).toHaveBeenCalled();
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:fileament-backup');
+  expect(await screen.findByText('Backup downloaded.')).toBeInTheDocument();
+});
+
+test('reviews and explicitly confirms a full restore before signing out', async () => {
+  window.history.pushState({}, '', '/settings');
+  const calls: string[] = [];
+  let authenticated = true;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 2048 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    if (url === '/api/backups/inspect' && init?.method === 'POST') return Response.json({
+      restoreToken: 'review-token',
+      manifest: { backupFormatVersion: 1, dataFormatVersion: 1, databaseVersion: 1, createdAt: '2026-08-03T15:33:45Z', models: 12, files: 34, collections: 5 },
+    });
+    if (url === '/api/backups/restore' && init?.method === 'POST') {
+      authenticated = false;
+      return Response.json({ ok: true });
+    }
+    return Response.json({});
+  }));
+  renderApp();
+
+  const input = await screen.findByLabelText('Fileament backup');
+  fireEvent.change(input, { target: { files: [new File(['backup'], 'library.fileament', { type: 'application/zip' })] } });
+  fireEvent.click(screen.getByRole('button', { name: /review backup/i }));
+  expect(await screen.findByText('12 models')).toBeInTheDocument();
+  expect(screen.getByText('34 files')).toBeInTheDocument();
+  expect(screen.getByText('5 collections')).toBeInTheDocument();
+  expect(calls).not.toContain('POST /api/backups/restore');
+
+  const restore = screen.getByRole('button', { name: /replace current data/i });
+  expect(restore).toBeDisabled();
+  fireEvent.change(screen.getByLabelText(/type restore to confirm/i), { target: { value: 'restore' } });
+  expect(restore).toBeDisabled();
+  fireEvent.change(screen.getByLabelText(/type restore to confirm/i), { target: { value: 'RESTORE' } });
+  expect(restore).toBeEnabled();
+  fireEvent.click(restore);
+
+  await waitFor(() => expect(calls).toContain('POST /api/backups/restore'));
+  expect(await screen.findByText('Owner login')).toBeInTheDocument();
+});
+
 test('reports a collections query failure instead of an empty state', async () => {
   window.history.pushState({}, '', '/collections');
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {

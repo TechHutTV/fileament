@@ -5,6 +5,8 @@ import (
 	"errors"
 )
 
+const schemaVersion = 1
+
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -15,7 +17,7 @@ func migrate(db *sql.DB) error {
 	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > schemaVersion {
 		return errors.New("database schema is newer than this Fileament build")
 	}
 	if version == 0 {

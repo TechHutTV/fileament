@@ -34,6 +34,9 @@ func (a *App) startWorkers() {
 	if a.cfg.ThumbWorkers <= 0 {
 		return
 	}
+	if a.stop == nil {
+		a.stop = make(chan struct{})
+	}
 	for i := 0; i < a.cfg.ThumbWorkers; i++ {
 		a.workerWG.Add(1)
 		go func() {
@@ -50,6 +53,15 @@ func (a *App) startWorkers() {
 			}
 		}()
 	}
+}
+
+func (a *App) stopWorkers() {
+	if a.stop == nil {
+		return
+	}
+	close(a.stop)
+	a.workerWG.Wait()
+	a.stop = nil
 }
 
 func (a *App) refreshThumbnailRenderVersion() error {
@@ -102,11 +114,13 @@ func (a *App) refreshThumbnailRenderVersion() error {
 }
 
 func (a *App) mountThumbRoutes(r chi.Router) {
-	r.With(a.requireAuth).Get("/api/events", a.handleEvents)
+	r.With(a.requireDataAuth).Get("/api/events", a.handleEvents)
 	r.With(a.requireAuth).Get("/thumbs/{modelID}/{name}", a.handleThumb)
 }
 
 func (a *App) processNextThumbnail() (err error) {
+	a.dataMu.RLock()
+	defer a.dataMu.RUnlock()
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -231,7 +245,7 @@ func copyFile(dst, src string) error {
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
-	ch := a.subscribeEvents()
+	ch, reset := a.subscribeEventStream()
 	defer a.unsubscribeEvents(ch)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -239,6 +253,8 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-reset:
 			return
 		case evt := <-ch:
 			b, _ := json.Marshal(evt)
@@ -251,11 +267,24 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) subscribeEvents() chan ThumbnailEvent {
+	ch, _ := a.subscribeEventStream()
+	return ch
+}
+
+func (a *App) subscribeEventStream() (chan ThumbnailEvent, <-chan struct{}) {
 	ch := make(chan ThumbnailEvent, 8)
 	a.eventsMu.Lock()
 	a.events[ch] = struct{}{}
+	reset := a.eventsReset
 	a.eventsMu.Unlock()
-	return ch
+	return ch, reset
+}
+
+func (a *App) resetEventStreams() {
+	a.eventsMu.Lock()
+	close(a.eventsReset)
+	a.eventsReset = make(chan struct{})
+	a.eventsMu.Unlock()
 }
 
 func (a *App) unsubscribeEvents(ch chan ThumbnailEvent) {

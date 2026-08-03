@@ -86,6 +86,7 @@ All configuration is optional and provided through environment variables.
 | `FILEAMENT_PORT` | `8080` | HTTP port inside the container. |
 | `FILEAMENT_OWNER_PASSWORD` | unset | Seeds the owner password on first boot. Ignored after an owner password exists. |
 | `FILEAMENT_MAX_UPLOAD_MB` | `2048` | Maximum upload request size and maximum expanded ZIP size in MiB. |
+| `FILEAMENT_MAX_BACKUP_MB` | `8192` | Maximum uploaded backup size and maximum expanded backup size in MiB. |
 | `FILEAMENT_THUMB_WORKERS` | `2` | Number of background thumbnail workers. |
 | `FILEAMENT_BASE_URL` | unset | Public base URL used when displaying share links and determining secure-cookie behavior. |
 
@@ -95,6 +96,7 @@ Example:
 environment:
   FILEAMENT_BASE_URL: https://models.example.com
   FILEAMENT_MAX_UPLOAD_MB: "4096"
+  FILEAMENT_MAX_BACKUP_MB: "16384"
   FILEAMENT_THUMB_WORKERS: "4"
 ```
 
@@ -129,6 +131,8 @@ Everything required to restore Fileament lives under `/data`:
   fileament.db
   collections.json
   tmp/
+  backups/
+  .restore/
   models/
     <model-id>/
       model.json
@@ -137,9 +141,17 @@ Everything required to restore Fileament lives under `/data`:
       thumbs/
 ```
 
-Back up the entire volume, not only `fileament.db`. The JSON sidecars preserve model and collection metadata and can rebuild a fresh SQLite index at startup.
+Use **Settings → Backup and restore** to create a versioned `.fileament` backup. It contains a consistent SQLite snapshot plus every persistent data file, including models, images, collections, settings, the owner password hash, and share links. Login sessions and transient backup/restore workspace are intentionally excluded. Treat the downloaded file as sensitive.
 
-For a consistent filesystem-level backup, stop Fileament before copying the volume:
+Restoring is a full replacement, not a merge. Fileament validates the uploaded archive, database, sidecars, checksums, paths, sizes, and format versions before showing its contents for confirmation. Applying it creates a pre-restore safety backup under `/data/backups`, pauses writes and thumbnail workers, swaps the validated data, reopens and migrates SQLite, and automatically rolls back if activation fails. If both activation and the immediate rollback fail, Fileament retries journal recovery once, remains in maintenance with an unhealthy `/healthz` response if recovery is still impossible, and retries recovery at the next startup. Every login session is invalidated after a successful restore; sign in with the owner password stored in that backup. Safety backups are not recursively included in later downloads and can be removed manually after the restored installation has been verified.
+
+The owner-only backup API uses these endpoints:
+
+- `POST /api/backups` creates and downloads a backup.
+- `POST /api/backups/inspect` accepts one multipart `file` and returns a validated manifest plus a temporary restore token.
+- `POST /api/backups/restore` accepts that token and the exact confirmation value `RESTORE`.
+
+For an independent infrastructure-level backup, copy the entire volume, not only `fileament.db`. The JSON sidecars preserve model and collection metadata and can rebuild a fresh SQLite index at startup. Stop Fileament first so SQLite and normal files share one consistency boundary:
 
 ```sh
 docker stop fileament

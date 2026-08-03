@@ -1175,6 +1175,115 @@ label textarea {
   justify-content: center;
 }
 
+.backup-action {
+  align-items: center;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+}
+
+.backup-action > div,
+.restore-form > div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.backup-action p,
+.restore-form p,
+.restore-review p {
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.backup-action button {
+  flex: 0 0 auto;
+}
+
+.backup-warning {
+  background: color-mix(in srgb, #b7791f 9%, transparent);
+  border: 1px solid color-mix(in srgb, #b7791f 22%, transparent);
+  border-radius: 8px;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 16px 0 0;
+  padding: 10px 12px;
+}
+
+.restore-divider {
+  border-top: 1px solid color-mix(in srgb, currentColor 11%, transparent);
+  margin: 22px 0;
+}
+
+.restore-form {
+  display: grid;
+  gap: 16px;
+}
+
+.restore-picker {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.restore-picker label {
+  min-width: 0;
+}
+
+.restore-picker input[type="file"] {
+  font-size: 13px;
+  min-width: 0;
+  padding: 8px;
+  width: 100%;
+}
+
+.restore-review {
+  background: color-mix(in srgb, #a95353 6%, transparent);
+  border: 1px solid color-mix(in srgb, #a95353 22%, transparent);
+  border-radius: 10px;
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 16px;
+}
+
+.restore-review > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.restore-review small {
+  color: color-mix(in srgb, currentColor 56%, transparent);
+}
+
+.restore-review ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.restore-review li {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 9px;
+}
+
+.restore-confirmation {
+  width: min(420px, 100%);
+}
+
+.restore-confirmation button {
+  justify-content: center;
+}
+
 .share-row:first-of-type {
   border-top: 0;
 }
@@ -1765,6 +1874,21 @@ label textarea {
   .model-color-setting {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .backup-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backup-action button,
+  .restore-picker button {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .restore-picker {
+    grid-template-columns: 1fr;
   }
 
   .collection-create .inline-form {
