@@ -311,6 +311,9 @@ function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<M
 function UploadPage() {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
+  const [itemToRemove, setItemToRemove] = useState<UploadItem | null>(null);
+  const [removingKey, setRemovingKey] = useState('');
+  const [removeError, setRemoveError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [collectionID, setCollectionID] = useState('');
   const [organization, setOrganization] = useState<UploadOrganization | ''>('');
@@ -428,8 +431,10 @@ function UploadPage() {
     cancelled.current.add(item.key);
     if (!item.model) {
       setItems((current) => current.filter((candidate) => candidate.key !== item.key));
-      return;
+      return true;
     }
+    setRemovingKey(item.key);
+    setRemoveError('');
     updateItem(item.key, { status: 'removing' });
     try {
       await api(`/api/models/${item.model.id}`, { method: 'DELETE' });
@@ -437,9 +442,13 @@ function UploadPage() {
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
       qc.invalidateQueries({ queryKey: ['collections'] });
+      return true;
     } catch {
       updateItem(item.key, { status: 'error', error: 'Could not remove this model.' });
+      setRemoveError('This model could not be deleted. Try again.');
+      return false;
     } finally {
+      setRemovingKey('');
       cancelled.current.delete(item.key);
     }
   };
@@ -518,12 +527,13 @@ function UploadPage() {
         const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
         return <article className={`upload-card ${item.status}`} key={item.key}>
           <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${itemName} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
-          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { void removeItem(item); }} disabled={item.status === 'removing'}><X size={17} /></button>
+          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { if (item.model) { setRemoveError(''); setItemToRemove(item); } else { void removeItem(item); } }} disabled={item.status === 'removing'}><X size={17} /></button>
           <div className="upload-card-body"><div><h3>{itemName}</h3><p>{item.files.length > 1 ? `${item.files.length} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
         </article>;
       })}</div>
     </section>}
     {items.length > 0 && <footer className="upload-finish"><div><strong>{active ? 'Uploads in progress' : `${completed} ${completed === 1 ? 'model' : 'models'} added`}</strong><span>{active ? 'You can keep adding files while these finish.' : 'Everything is saved to your library.'}</span></div><button type="button" disabled={active} onClick={() => navigate('/')}><Check size={18} />Finish and view library</button></footer>}
+    <ConfirmationDialog request={itemToRemove ? { title: 'Delete uploaded model?', description: `Delete “${itemToRemove.model?.title || itemToRemove.title || itemToRemove.file.name}” from your library? This cannot be undone.`, confirmLabel: 'Delete model', onConfirm: () => { void removeItem(itemToRemove).then((removed) => { if (removed) setItemToRemove(null); }); } } : null} busy={!!itemToRemove && removingKey === itemToRemove.key} error={removeError || undefined} onCancel={() => { setRemoveError(''); setItemToRemove(null); }} />
   </section>;
 }
 
@@ -532,7 +542,13 @@ function SettingsPage() {
   const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
   const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [shareToRevoke, setShareToRevoke] = useState<Share | null>(null);
-  const revoke = useMutation({ mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }), onSuccess: () => { setShareToRevoke(null); qc.invalidateQueries({ queryKey: ['shares'] }); } });
+  const revoke = useMutation({
+    mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }),
+    onSuccess: (_, id) => {
+      qc.setQueryData<Share[]>(['shares'], (current) => current?.map((share) => share.id === id ? { ...share, revokedAt: Math.floor(Date.now() / 1000) } : share));
+      setShareToRevoke(null);
+    },
+  });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [modelColor, setModelColor] = useState(getModelColor);
@@ -728,6 +744,7 @@ function ConfirmationDialog({ request, busy, error, onCancel }: { request: Confi
   const descriptionID = useId();
   const cancelButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const cancelAction = useRef(onCancel);
   const busyState = useRef(busy);
   cancelAction.current = onCancel;
@@ -744,7 +761,11 @@ function ConfirmationDialog({ request, busy, error, onCancel }: { request: Confi
       }
       if (event.key !== 'Tab') return;
       const controls = [cancelButton.current, confirmButton.current].filter((button): button is HTMLButtonElement => !!button && !button.disabled);
-      if (controls.length === 0) return;
+      if (controls.length === 0) {
+        event.preventDefault();
+        dialog.current?.focus();
+        return;
+      }
       const current = controls.indexOf(document.activeElement as HTMLButtonElement);
       const next = event.shiftKey ? (current <= 0 ? controls.length - 1 : current - 1) : (current + 1) % controls.length;
       event.preventDefault();
@@ -759,7 +780,7 @@ function ConfirmationDialog({ request, busy, error, onCancel }: { request: Confi
   }, [open]);
   if (!request) return null;
   return <div className="confirmation-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
-    <div className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID}>
+    <div ref={dialog} className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} tabIndex={-1}>
       <span className="confirmation-icon"><Trash2 size={22} aria-hidden /></span>
       <h2 id={titleID}>{request.title}</h2>
       <p id={descriptionID}>{request.description}</p>

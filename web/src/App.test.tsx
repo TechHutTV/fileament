@@ -103,6 +103,10 @@ test('manages a dropped multi-model upload queue', async () => {
   expect(screen.getByAltText('bracket.stl thumbnail')).toHaveAttribute('src', '/thumbs/bracket.stl/card.png');
 
   fireEvent.click(screen.getByRole('button', { name: 'Remove cube.stl' }));
+  const dialog = await screen.findByRole('alertdialog', { name: 'Delete uploaded model?' });
+  expect(within(dialog).getByText(/cube\.stl.*library/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/models/cube.stl');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete model' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
   expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
 
@@ -277,6 +281,8 @@ test('refreshes collections after removing an assigned upload', async () => {
   await waitFor(() => expect(collectionFetches).toBe(2));
 
   fireEvent.click(await screen.findByRole('button', { name: 'Remove cube.stl' }));
+  const dialog = await screen.findByRole('alertdialog', { name: 'Delete uploaded model?' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete model' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
   await waitFor(() => expect(collectionFetches).toBe(3));
 });
@@ -654,11 +660,14 @@ test('reports a share-links query failure instead of an empty state', async () =
 test('shows the revoke action only for active share links', async () => {
   window.history.pushState({}, '', '/settings');
   const calls: string[] = [];
+  let finishRevoke: () => void = () => undefined;
+  const revokeResponse = new Promise<Response>((resolve) => { finishRevoke = () => resolve(new Response(null, { status: 204 })); });
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url === '/api/shares/active' && init?.method === 'DELETE') return revokeResponse;
     if (url.includes('/api/shares')) return Response.json([
       { id: 'active', token: 'active-token', scope: 'model', targetId: 'm1', label: 'Active link' },
       { id: 'revoked', token: 'revoked-token', scope: 'model', targetId: 'm1', label: 'Revoked link', revokedAt: 1 },
@@ -675,6 +684,12 @@ test('shows the revoke action only for active share links', async () => {
   expect(calls).not.toContain('DELETE /api/shares/active');
   fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke link' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/shares/active'));
+  expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  fireEvent.keyDown(document, { key: 'Tab' });
+  expect(dialog).toHaveFocus();
+  finishRevoke();
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: 'Revoke Active link share' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Revoke Revoked link share' })).not.toBeInTheDocument();
 });
 
