@@ -208,6 +208,19 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (a *App) requireDataAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.dataMu.RLock()
+		valid := a.validSession(r)
+		a.dataMu.RUnlock()
+		if !valid {
+			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {

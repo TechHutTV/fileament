@@ -11,6 +11,7 @@ type Config struct {
 	Port          string
 	OwnerPassword string
 	MaxUploadMB   int64
+	MaxBackupMB   int64
 	ThumbWorkers  int
 	BaseURL       string
 }
@@ -22,6 +23,7 @@ func FromEnv() Config {
 		Port:          env("FILEAMENT_PORT", "8080"),
 		OwnerPassword: os.Getenv("FILEAMENT_OWNER_PASSWORD"),
 		MaxUploadMB:   envInt64("FILEAMENT_MAX_UPLOAD_MB", 2048),
+		MaxBackupMB:   envInt64("FILEAMENT_MAX_BACKUP_MB", 8192),
 		ThumbWorkers:  int(envInt64("FILEAMENT_THUMB_WORKERS", 2)),
 		BaseURL:       os.Getenv("FILEAMENT_BASE_URL"),
 	}

@@ -49,6 +49,8 @@ type Page = { items: Model[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
+type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
+type BackupInspection = { restoreToken: string; manifest: BackupManifest };
 type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
 type UploadOrganization = 'separate' | 'grouped';
 type UploadItem = { key: string; file: File; files: File[]; title?: string; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
@@ -529,8 +531,21 @@ function SettingsPage() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [modelColor, setModelColor] = useState(getModelColor);
+  const [backupDownloaded, setBackupDownloaded] = useState(false);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [inspection, setInspection] = useState<BackupInspection | null>(null);
+  const [confirmation, setConfirmation] = useState('');
   const chooseModelColor = (color: string) => setModelColor(saveModelColor(color));
   const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); } });
+  const backup = useMutation({ mutationFn: downloadBackupFile, onMutate: () => setBackupDownloaded(false), onSuccess: () => setBackupDownloaded(true) });
+  const inspect = useMutation<BackupInspection, Error, File>({
+    mutationFn: (file) => { const body = new FormData(); body.append('file', file); return api('/api/backups/inspect', { method: 'POST', body }); },
+    onSuccess: (result) => { setInspection(result); setConfirmation(''); },
+  });
+  const restore = useMutation({
+    mutationFn: () => api('/api/backups/restore', { method: 'POST', body: JSON.stringify({ restoreToken: inspection?.restoreToken, confirmation }) }),
+    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ['me'] }); },
+  });
   return <section className="content narrow settings-page">
     <PageHeader eyebrow="Owner controls" title="Settings" description="Manage appearance, storage, account security, and public access to your library." />
     <div className="storage-card"><span className="surface-icon"><HardDrive size={20} /></span><div><span>Library storage</span><strong>{formatBytes(data?.totalBytes ?? 0)}</strong></div></div>
@@ -540,6 +555,32 @@ function SettingsPage() {
         <label className="model-color-picker"><input type="color" aria-label="Model color" value={modelColor} onChange={(event) => chooseModelColor(event.target.value)} /><span><strong>Model color</strong><small>{modelColor.toUpperCase()}</small></span></label>
         <div className="model-color-presets" role="group" aria-label="Model color presets">{MODEL_COLOR_PRESETS.map(([name, color]) => <button type="button" className="model-color-preset" aria-label={`Use ${name} model color`} aria-pressed={modelColor === color} title={name} style={{ backgroundColor: color }} onClick={() => chooseModelColor(color)} key={color} />)}</div>
       </div>
+    </section>
+    <section className="surface-card settings-card backup-settings">
+      <SectionHeading icon={<Download size={19} />} title="Backup and restore" description="Download a complete copy of this Fileament installation or replace it from a previous backup." />
+      <div className="backup-action">
+        <div><strong>Create backup</strong><p>Includes models, files, images, collections, settings, and share links. Login sessions are intentionally excluded.</p></div>
+        <button type="button" disabled={backup.isPending} onClick={() => backup.mutate()}><Download size={17} />{backup.isPending ? 'Preparing backup' : 'Create and download backup'}</button>
+      </div>
+      <p className="backup-warning">Treat downloaded backups as sensitive. They contain the owner password hash and active share links.</p>
+      {backup.isError && <p className="error" role="alert">Backup could not be created.</p>}
+      {backupDownloaded && <p className="success" role="status">Backup downloaded.</p>}
+      <div className="restore-divider" />
+      <form className="restore-form" onSubmit={(event) => { event.preventDefault(); if (restoreFile) inspect.mutate(restoreFile); }}>
+        <div><strong>Restore backup</strong><p>Choose a Fileament backup to validate and review. Current data is not changed during review.</p></div>
+        <div className="restore-picker"><label>Fileament backup<input type="file" accept=".fileament,application/zip" onChange={(event) => { setRestoreFile(event.target.files?.[0] ?? null); setInspection(null); setConfirmation(''); inspect.reset(); restore.reset(); }} /></label><button type="submit" disabled={!restoreFile || inspect.isPending}>{inspect.isPending ? 'Reviewing backup' : 'Review backup'}</button></div>
+      </form>
+      {inspect.isError && <p className="error" role="alert">This backup could not be validated.</p>}
+      {inspection && <div className="restore-review">
+        <div><strong>Backup is ready to restore</strong><small>{new Date(inspection.manifest.createdAt).toLocaleString()}</small></div>
+        <ul aria-label="Backup contents"><li>{inspection.manifest.models} models</li><li>{inspection.manifest.files} files</li><li>{inspection.manifest.collections} collections</li></ul>
+        <p>Restoring replaces the current library, owner password, settings, and share links. Fileament creates a local safety backup first and signs out every session afterward.</p>
+        <form className="stack restore-confirmation" onSubmit={(event) => { event.preventDefault(); if (confirmation === 'RESTORE') restore.mutate(); }}>
+          <label>Type RESTORE to confirm<input value={confirmation} autoComplete="off" onChange={(event) => setConfirmation(event.target.value)} /></label>
+          <button type="submit" className="danger" disabled={confirmation !== 'RESTORE' || restore.isPending}>{restore.isPending ? 'Replacing current data' : 'Replace current data'}</button>
+        </form>
+        {restore.isError && <p className="error" role="alert">Restore failed. Fileament kept or recovered the previous installation.</p>}
+      </div>}
     </section>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Lock size={19} />} title="Security" description="Update the password used to access this private library." />
@@ -746,6 +787,21 @@ async function api(path: string, init: RequestInit = {}) {
   const body = await res.text();
   if (!res.ok) throw new Error(body);
   return body ? JSON.parse(body) : null;
+}
+
+async function downloadBackupFile() {
+  const response = await fetch('/api/backups', { method: 'POST', credentials: 'include' });
+  if (!response.ok) throw new Error(await response.text());
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? 'fileament-backup.fileament';
+  const url = window.URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 }
 
 function navigate(path: string, replace = false) {

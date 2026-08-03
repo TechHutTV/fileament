@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/TechHutTV/fileament/internal/config"
 	"github.com/TechHutTV/fileament/internal/storage"
@@ -18,14 +20,18 @@ import (
 )
 
 type App struct {
-	cfg      config.Config
-	db       *sql.DB
-	webFS    fs.FS
-	stop     chan struct{}
-	workerWG sync.WaitGroup
-	thumbMu  sync.Mutex
-	eventsMu sync.Mutex
-	events   map[chan ThumbnailEvent]struct{}
+	cfg         config.Config
+	db          *sql.DB
+	webFS       fs.FS
+	dataMu      sync.RWMutex
+	restoreMu   sync.Mutex
+	maintenance atomic.Bool
+	stop        chan struct{}
+	workerWG    sync.WaitGroup
+	thumbMu     sync.Mutex
+	eventsMu    sync.Mutex
+	events      map[chan ThumbnailEvent]struct{}
+	eventsReset chan struct{}
 }
 
 func New(cfg config.Config, webFS fs.FS) (*App, error) {
@@ -35,10 +41,63 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 	if _, err := fs.Stat(webFS, "index.html"); err != nil {
 		return nil, fmt.Errorf("web filesystem does not contain index.html: %w", err)
 	}
+	if err := recoverInterruptedRestore(cfg.DataDir); err != nil {
+		return nil, err
+	}
+	if err := cleanupRestoreWorkspace(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	if err := storage.EnsureLayout(cfg.DataDir); err != nil {
 		return nil, err
 	}
-	dbPath := filepath.ToSlash(filepath.Join(cfg.DataDir, "fileament.db"))
+	db, err := openDatabase(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
+	if err := app.initializeData(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	app.startWorkers()
+	return app, nil
+}
+
+func (a *App) Close() error {
+	a.stopWorkers()
+	if a.db != nil {
+		return a.db.Close()
+	}
+	return nil
+}
+
+func (a *App) Router() http.Handler {
+	r := chi.NewRouter()
+	r.Use(a.maintenanceMiddleware)
+	r.Use(a.dataAccessMiddleware)
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if a.maintenance.Load() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "maintenance"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	r.Get("/api/me", a.handleMe)
+	r.Post("/api/auth/setup", a.handleSetup)
+	r.Post("/api/auth/login", a.handleLogin)
+	r.Post("/api/auth/logout", a.handleLogout)
+	r.With(a.requireAuth).Post("/api/auth/password", a.handleChangePassword)
+	r.With(a.requireAuth).Get("/api/storage", a.handleStorageStats)
+	a.mountModelRoutes(r)
+	a.mountCollectionRoutes(r)
+	a.mountThumbRoutes(r)
+	a.mountBackupRoutes(r)
+	r.Get("/*", a.serveSPA)
+	return r
+}
+
+func openDatabase(dataDir string) (*sql.DB, error) {
+	dbPath := filepath.ToSlash(filepath.Join(dataDir, "fileament.db"))
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
@@ -51,59 +110,45 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}}
-	if err := app.seedOwnerPassword(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := app.rebuildFromSidecars(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := app.rebuildCollectionsFromSidecar(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := app.refreshThumbnailRenderVersion(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := app.recoverThumbnailJobs(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	app.startWorkers()
-	return app, nil
+	return db, nil
 }
 
-func (a *App) Close() error {
-	if a.stop != nil {
-		close(a.stop)
-		a.workerWG.Wait()
-		a.stop = nil
+func (a *App) initializeData() error {
+	if err := a.seedOwnerPassword(); err != nil {
+		return err
 	}
-	if a.db != nil {
-		return a.db.Close()
+	if err := a.rebuildFromSidecars(); err != nil {
+		return err
 	}
-	return nil
+	if err := a.rebuildCollectionsFromSidecar(); err != nil {
+		return err
+	}
+	if err := a.refreshThumbnailRenderVersion(); err != nil {
+		return err
+	}
+	return a.recoverThumbnailJobs()
 }
 
-func (a *App) Router() http.Handler {
-	r := chi.NewRouter()
-	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+func (a *App) maintenanceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.maintenance.Load() && r.URL.Path != "/healthz" {
+			writeError(w, http.StatusServiceUnavailable, errors.New("Fileament is applying a restore"))
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
-	r.Get("/api/me", a.handleMe)
-	r.Post("/api/auth/setup", a.handleSetup)
-	r.Post("/api/auth/login", a.handleLogin)
-	r.Post("/api/auth/logout", a.handleLogout)
-	r.With(a.requireAuth).Post("/api/auth/password", a.handleChangePassword)
-	r.With(a.requireAuth).Get("/api/storage", a.handleStorageStats)
-	a.mountModelRoutes(r)
-	a.mountCollectionRoutes(r)
-	a.mountThumbRoutes(r)
-	r.Get("/*", a.serveSPA)
-	return r
+}
+
+func (a *App) dataAccessMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/backups") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		a.dataMu.RLock()
+		defer a.dataMu.RUnlock()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
