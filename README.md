@@ -88,7 +88,7 @@ All configuration is optional and provided through environment variables.
 | `FILEAMENT_MAX_UPLOAD_MB` | `2048` | Maximum upload request size and maximum expanded ZIP size in MiB. |
 | `FILEAMENT_MAX_BACKUP_MB` | `8192` | Maximum uploaded backup size and maximum expanded backup size in MiB. |
 | `FILEAMENT_THUMB_WORKERS` | `2` | Number of background thumbnail workers. |
-| `FILEAMENT_BASE_URL` | unset | Public base URL used when displaying share links and determining secure-cookie behavior. |
+| `FILEAMENT_BASE_URL` | unset | Public HTTP(S) origin used when displaying share links and determining secure-cookie behavior. Paths are ignored because Fileament does not support subpath mounting. |
 
 Example:
 
@@ -120,7 +120,7 @@ Supported meshes can be opened in the browser viewer. Files larger than 50 MB wa
 
 ### Share models and collections
 
-Share links are read-only and scoped to one model or collection. They can include an expiration date, track access counts, and be revoked at any time. Shared pages are marked `noindex` for search engines.
+Share links are read-only and scoped to one model or collection. They can expire after a chosen number of days or remain active without an expiration date, and they can be revoked at any time. **Settings → Share links** shows each target, creation and expiration dates, lifecycle status, copy-ready public URL, and shared-page view count. A view is one successful shared-page load; thumbnail, mesh, image, file, and background access-status requests do not inflate it. Open shared pages periodically revalidate access and stop displaying cached content after expiration or revocation. Shared pages are marked `noindex` for search engines.
 
 ## Data and backups
 
