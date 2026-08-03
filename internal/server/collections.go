@@ -27,6 +27,11 @@ type Collection struct {
 	Models       []Model  `json:"models,omitempty"`
 }
 
+type collectionSummary struct {
+	Collection
+	CoverThumb string `json:"coverThumb,omitempty"`
+}
+
 type ShareLink struct {
 	ID        string `json:"id"`
 	Token     string `json:"token"`
@@ -62,8 +67,34 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 }
 
 func (a *App) handleListCollections(w http.ResponseWriter, r *http.Request) {
-	out, err := a.listCollections()
+	collections, err := a.listCollections()
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]collectionSummary, len(collections))
+	indexes := make(map[string]int, len(collections))
+	for i, collection := range collections {
+		out[i].Collection = collection
+		indexes[collection.ID] = i
+	}
+	rows, err := a.db.Query(`SELECT c.id, COALESCE(m.primary_thumb, '') FROM collections c LEFT JOIN models m ON m.id = c.cover_model_id`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, coverThumb string
+		if err := rows.Scan(&id, &coverThumb); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if i, ok := indexes[id]; ok {
+			out[i].CoverThumb = coverThumb
+		}
+	}
+	if err := rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
