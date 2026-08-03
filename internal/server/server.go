@@ -24,6 +24,7 @@ type App struct {
 	db          *sql.DB
 	webFS       fs.FS
 	dataMu      sync.RWMutex
+	restoreMu   sync.Mutex
 	maintenance atomic.Bool
 	stop        chan struct{}
 	workerWG    sync.WaitGroup
@@ -41,6 +42,9 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 		return nil, fmt.Errorf("web filesystem does not contain index.html: %w", err)
 	}
 	if err := recoverInterruptedRestore(cfg.DataDir); err != nil {
+		return nil, err
+	}
+	if err := cleanupRestoreWorkspace(cfg.DataDir); err != nil {
 		return nil, err
 	}
 	if err := storage.EnsureLayout(cfg.DataDir); err != nil {

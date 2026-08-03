@@ -155,6 +155,9 @@ func TestRestoreInspectStagesValidBackupWithoutChangingLibrary(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("inspect status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("inspect cache control=%q", rec.Header().Get("Cache-Control"))
+	}
 	var result struct {
 		RestoreToken string         `json:"restoreToken"`
 		Manifest     backupManifest `json:"manifest"`
@@ -171,6 +174,21 @@ func TestRestoreInspectStagesValidBackupWithoutChangingLibrary(t *testing.T) {
 	}
 	if models != 1 {
 		t.Fatalf("preflight changed model count to %d", models)
+	}
+}
+
+func TestRestoreInspectionReplacesPreviousStage(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	backup := downloadBackup(t, app, cookie)
+	first := inspectBackup(t, app, cookie, backup)
+	second := inspectBackup(t, app, cookie, backup)
+	stagingRoot := filepath.Join(app.cfg.DataDir, ".restore", "staging")
+	if _, err := os.Stat(filepath.Join(stagingRoot, first.RestoreToken)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first stage remains after replacement: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stagingRoot, second.RestoreToken)); err != nil {
+		t.Fatalf("replacement stage is missing: %v", err)
 	}
 }
 
@@ -225,7 +243,14 @@ func TestRestoreReplacesInstallationCreatesSafetyBackupAndInvalidatesSessions(t 
 	if !strings.Contains(meRec.Body.String(), `"authenticated":false`) {
 		t.Fatalf("restored session remained authenticated: %s", meRec.Body.String())
 	}
-	loginCookie(t, destination, "source-password")
+	restoredCookie := loginCookie(t, destination, "source-password")
+	reuseReq := jsonReq(http.MethodPost, "/api/backups/restore", `{"restoreToken":"`+inspection.RestoreToken+`","confirmation":"RESTORE"}`)
+	reuseReq.AddCookie(restoredCookie)
+	reuseRec := httptest.NewRecorder()
+	destination.Router().ServeHTTP(reuseRec, reuseReq)
+	if reuseRec.Code != http.StatusBadRequest {
+		t.Fatalf("reused restore status=%d body=%s", reuseRec.Code, reuseRec.Body.String())
+	}
 	badLogin := httptest.NewRecorder()
 	destination.Router().ServeHTTP(badLogin, jsonReq(http.MethodPost, "/api/auth/login", `{"password":"destination-password"}`))
 	if badLogin.Code != http.StatusUnauthorized {
@@ -392,6 +417,9 @@ func TestStartupRollsBackInterruptedRestore(t *testing.T) {
 	if err := os.MkdirAll(rollbackRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(app.cfg.DataDir, ".restore", "applying", token), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	journal := restoreJournal{
 		Version:         1,
 		Token:           token,
@@ -454,6 +482,74 @@ func TestCopyBackupEntryEnforcesActualExpandedLimit(t *testing.T) {
 	}
 	if copied != 33 || destination.Len() != 33 {
 		t.Fatalf("copy should stop one byte beyond the limit: copied=%d len=%d", copied, destination.Len())
+	}
+}
+
+func TestReadFileLimitedRejectsOversizedMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 33), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFileLimited(path, 32); err == nil || !strings.Contains(err.Error(), "metadata size limit") {
+		t.Fatalf("oversized metadata error=%v", err)
+	}
+}
+
+func TestConsumeRestoreStageIsExpiringAndOneTime(t *testing.T) {
+	dataRoot := t.TempDir()
+	now := time.Now()
+	expired := filepath.Join(dataRoot, ".restore", "staging", "expired")
+	if err := os.MkdirAll(expired, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-restoreStageTTL - time.Minute)
+	if err := os.Chtimes(expired, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumeRestoreStage(dataRoot, "expired", now); !errors.Is(err, errRestoreStageUnavailable) {
+		t.Fatalf("expired stage error=%v", err)
+	}
+	if _, err := os.Stat(expired); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired stage remains: %v", err)
+	}
+
+	fresh := filepath.Join(dataRoot, ".restore", "staging", "fresh")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := consumeRestoreStage(dataRoot, "fresh", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(filepath.Dir(consumed)) != "applying" {
+		t.Fatalf("stage consumed into %q", consumed)
+	}
+	if _, err := consumeRestoreStage(dataRoot, "fresh", now); err == nil {
+		t.Fatal("consumed stage token was reusable")
+	}
+}
+
+func TestStartupCleansAbandonedRestoreWorkspace(t *testing.T) {
+	app := newAuthedTestApp(t)
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"staging", "applying", "rollback"} {
+		path := filepath.Join(app.cfg.DataDir, ".restore", name, "abandoned")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := New(app.cfg, app.webFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for _, name := range []string{"staging", "applying", "rollback"} {
+		path := filepath.Join(app.cfg.DataDir, ".restore", name)
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("abandoned %s workspace remains: %v", name, err)
+		}
 	}
 }
 

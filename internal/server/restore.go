@@ -15,9 +15,16 @@ import (
 	"time"
 )
 
-const maxBackupEntries = 100000
+const (
+	maxBackupEntries      = 100000
+	maxBackupSidecarBytes = 64 << 20
+	restoreStageTTL       = time.Hour
+)
 
-var errBackupTooLarge = errors.New("backup exceeds the configured size limit")
+var (
+	errBackupTooLarge          = errors.New("backup exceeds the configured size limit")
+	errRestoreStageUnavailable = errors.New("staged restore is missing, expired, or already used")
+)
 
 type backupInspection struct {
 	RestoreToken string         `json:"restoreToken"`
@@ -37,6 +44,19 @@ type restoreJournal struct {
 }
 
 func (a *App) handleInspectBackup(w http.ResponseWriter, r *http.Request) {
+	a.restoreMu.Lock()
+	defer a.restoreMu.Unlock()
+	a.dataMu.RLock()
+	valid := a.validSession(r)
+	a.dataMu.RUnlock()
+	if !valid {
+		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+		return
+	}
+	if err := cleanupRestoreStaging(a.cfg.DataDir); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	max := a.maxBackupBytes()
 	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
 	mr, err := r.MultipartReader()
@@ -116,6 +136,7 @@ func (a *App) handleInspectBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keep = true
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, backupInspection{RestoreToken: token, Manifest: manifest})
 }
 
@@ -349,7 +370,7 @@ func validateStagedData(dataRoot string, manifest backupManifest) error {
 			continue
 		}
 		sidecarPath := filepath.Join(modelsRoot, dir.Name(), "model.json")
-		contents, err := os.ReadFile(sidecarPath)
+		contents, err := readFileLimited(sidecarPath, maxBackupSidecarBytes)
 		if err != nil {
 			return errors.New("backup model sidecar is missing")
 		}
@@ -397,7 +418,7 @@ func validateStagedData(dataRoot string, manifest backupManifest) error {
 		return errors.New("backup model sidecars do not match its manifest")
 	}
 	collectionsPath := filepath.Join(dataRoot, "collections.json")
-	if contents, err := os.ReadFile(collectionsPath); err == nil {
+	if contents, err := readFileLimited(collectionsPath, maxBackupSidecarBytes); err == nil {
 		var collections []Collection
 		if json.Unmarshal(contents, &collections) != nil {
 			return errors.New("backup collections sidecar is invalid")
@@ -432,6 +453,8 @@ func (a *App) handleApplyRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("restore token is invalid"))
 		return
 	}
+	a.restoreMu.Lock()
+	defer a.restoreMu.Unlock()
 	if !a.maintenance.CompareAndSwap(false, true) {
 		writeError(w, http.StatusConflict, errors.New("another maintenance operation is active"))
 		return
@@ -454,7 +477,11 @@ func (a *App) handleApplyRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.applyRestore(request.RestoreToken); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, errRestoreStageUnavailable) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -477,11 +504,12 @@ func (a *App) recoverDatabaseAfterFailedRestore() {
 
 func (a *App) applyRestore(token string) error {
 	restoreRoot := filepath.Join(a.cfg.DataDir, ".restore")
-	stageRoot, err := containedName(filepath.Join(restoreRoot, "staging"), token)
+	stageRoot, err := consumeRestoreStage(a.cfg.DataDir, token, time.Now())
 	if err != nil {
 		return err
 	}
-	manifestBytes, err := os.ReadFile(filepath.Join(stageRoot, "manifest.json"))
+	defer os.RemoveAll(stageRoot)
+	manifestBytes, err := readFileLimited(filepath.Join(stageRoot, "manifest.json"), 1<<20)
 	if err != nil {
 		return errors.New("staged restore was not found")
 	}
@@ -557,7 +585,6 @@ func (a *App) applyRestore(token string) error {
 	}
 	if applyErr == nil {
 		_ = os.RemoveAll(rollbackRoot)
-		_ = os.RemoveAll(stageRoot)
 		return nil
 	}
 	if a.db != nil {
@@ -711,7 +738,7 @@ func syncDirectory(path string) error {
 
 func recoverInterruptedRestore(dataRoot string) error {
 	statePath := filepath.Join(dataRoot, ".restore", "state.json")
-	contents, err := os.ReadFile(statePath)
+	contents, err := readFileLimited(statePath, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -726,7 +753,7 @@ func recoverInterruptedRestore(dataRoot string) error {
 }
 
 func rollbackRestoreFiles(dataRoot string, journal restoreJournal) error {
-	if _, err := containedName(filepath.Join(dataRoot, ".restore", "staging"), journal.Token); err != nil {
+	if _, err := containedName(filepath.Join(dataRoot, ".restore", "applying"), journal.Token); err != nil {
 		return errors.New("restore recovery token is invalid")
 	}
 	rollbackRoot, err := containedName(filepath.Join(dataRoot, ".restore", "rollback"), journal.Token)
@@ -777,7 +804,80 @@ func rollbackRestoreFiles(dataRoot string, journal restoreJournal) error {
 		return err
 	}
 	_ = os.RemoveAll(rollbackRoot)
-	stageRoot, _ := containedName(filepath.Join(dataRoot, ".restore", "staging"), journal.Token)
+	stageRoot, _ := containedName(filepath.Join(dataRoot, ".restore", "applying"), journal.Token)
 	_ = os.RemoveAll(stageRoot)
 	return nil
+}
+
+func readFileLimited(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	contents, readErr := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(contents)) > maxBytes {
+		return nil, errors.New("file exceeds the configured metadata size limit")
+	}
+	return contents, nil
+}
+
+func cleanupRestoreStaging(dataRoot string) error {
+	stagingRoot := filepath.Join(dataRoot, ".restore", "staging")
+	if err := os.RemoveAll(stagingRoot); err != nil {
+		return err
+	}
+	return os.MkdirAll(stagingRoot, 0o700)
+}
+
+func cleanupRestoreWorkspace(dataRoot string) error {
+	restoreRoot := filepath.Join(dataRoot, ".restore")
+	for _, name := range []string{"staging", "applying", "rollback"} {
+		workspace, err := containedName(restoreRoot, name)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(workspace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func consumeRestoreStage(dataRoot, token string, now time.Time) (string, error) {
+	restoreRoot := filepath.Join(dataRoot, ".restore")
+	stagingRoot := filepath.Join(restoreRoot, "staging")
+	stageRoot, err := containedName(stagingRoot, token)
+	if err != nil {
+		return "", errors.New("restore token is invalid")
+	}
+	info, err := os.Stat(stageRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", errRestoreStageUnavailable
+		}
+		return "", err
+	}
+	if now.Sub(info.ModTime()) > restoreStageTTL {
+		_ = os.RemoveAll(stageRoot)
+		return "", errRestoreStageUnavailable
+	}
+	applyingRoot := filepath.Join(restoreRoot, "applying")
+	if err := os.MkdirAll(applyingRoot, 0o700); err != nil {
+		return "", err
+	}
+	applyingStage, err := containedName(applyingRoot, token)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(stageRoot, applyingStage); err != nil {
+		return "", err
+	}
+	return applyingStage, nil
 }
