@@ -487,6 +487,23 @@ test('catalog exposes filters, sorting, pagination, and owner nav', async () => 
   await waitFor(() => expect(screen.queryByRole('link', { name: /second model/i })).not.toBeInTheDocument());
 });
 
+test('links to the source repository from the owner header', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  const github = await screen.findByRole('link', { name: 'View Fileament on GitHub' });
+  expect(github).toHaveAttribute('href', 'https://github.com/TechHutTV/fileament');
+  expect(github).toHaveAttribute('target', '_blank');
+  expect(github).toHaveAttribute('rel', 'noreferrer');
+});
+
 test('polishes empty collections and settings with active navigation and grouped states', async () => {
   window.history.pushState({}, '', '/collections');
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -564,6 +581,25 @@ test('reports a share-links query failure instead of an empty state', async () =
 
   expect(await screen.findByText('Share links could not be loaded')).toBeInTheDocument();
   expect(screen.queryByText('No share links yet')).not.toBeInTheDocument();
+});
+
+test('shows the revoke action only for active share links', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return Response.json([
+      { id: 'active', token: 'active-token', scope: 'model', targetId: 'm1', label: 'Active link' },
+      { id: 'revoked', token: 'revoked-token', scope: 'model', targetId: 'm1', label: 'Revoked link', revokedAt: 1 },
+    ]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByText('Revoked')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Revoke Active link share' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Revoke Revoked link share' })).not.toBeInTheDocument();
 });
 
 test('detail management actions call owner APIs and preserve viewer gate', async () => {

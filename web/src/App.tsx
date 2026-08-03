@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
@@ -87,6 +87,7 @@ function OwnerApp({ path }: { path: string }) {
           <a className={path === '/upload' ? 'active' : undefined} aria-current={path === '/upload' ? 'page' : undefined} href="/upload"><Upload size={18} />Upload</a>
           <a className={path.startsWith('/collections') ? 'active' : undefined} aria-current={path.startsWith('/collections') ? 'page' : undefined} href="/collections"><Folder size={18} />Collections</a>
           <a className={path === '/settings' ? 'active' : undefined} aria-current={path === '/settings' ? 'page' : undefined} href="/settings"><Settings size={18} />Settings</a>
+          <a className="icon" href="https://github.com/TechHutTV/fileament" target="_blank" rel="noreferrer" title="View Fileament on GitHub" aria-label="View Fileament on GitHub"><Github size={20} /></a>
           <button type="button" className="icon" onClick={() => setDark(!dark)} title="Toggle dark mode" aria-label="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
         </div>
       </nav>
@@ -549,7 +550,7 @@ function SettingsPage() {
       {sharesError && <Empty text="Share links could not be loaded" />}
       {sharesLoading && <Empty text="Loading share links" />}
       {!sharesLoading && !sharesError && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
-      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small><button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button></div>)}
+      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small>{!s.revokedAt && <button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button>}</div>)}
     </section>
   </section>;
 }
