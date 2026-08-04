@@ -1068,6 +1068,24 @@ label textarea {
   flex-direction: column;
   gap: 10px;
   justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.collection-cover.has-image img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.collection-cover.has-image span {
+  background: rgb(16 24 22 / 78%);
+  border-radius: 999px;
+  bottom: 10px;
+  color: #fff;
+  left: 10px;
+  padding: 4px 8px;
+  position: absolute;
 }
 
 .collection-cover span {

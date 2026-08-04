@@ -47,7 +47,7 @@ export type Model = {
 };
 type Page = { items: Model[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
-type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; modelIds?: string[]; models?: Model[] };
+type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: Model[] };
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
@@ -204,7 +204,7 @@ function Detail({ id }: { id: string }) {
   const file = model?.files.find((f) => f.id === selectedFileID) ?? model?.files?.[0];
   const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
   const previewThumb = fileThumbName(file) || model?.primaryThumb;
-  const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
+  const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['collections'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
   const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
   const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => navigate('/') });
   const renameFile = useMutation<Model, Error, { fid: string; filename: string }>({
@@ -601,6 +601,12 @@ function CollectionsPage() {
   const [formVersion, setFormVersion] = useState(0);
   const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { setFormVersion((version) => version + 1); qc.invalidateQueries({ queryKey: ['collections'] }); } });
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return undefined;
+    const events = new EventSource('/api/events');
+    events.addEventListener('thumbnail', () => qc.invalidateQueries({ queryKey: ['collections'] }));
+    return () => events.close();
+  }, [qc]);
   return <section className="content page-content collections-page">
     <PageHeader eyebrow="Organize your library" title="Collections" description="Group related models into focused sets for projects, printers, or workflows." />
     <section className="surface-card collection-create">
@@ -610,7 +616,7 @@ function CollectionsPage() {
     {isError && <Empty text="Collections could not be loaded" />}
     {isLoading && <Empty text="Loading collections" />}
     {!isLoading && !isError && (data?.length ?? 0) === 0 && <EmptyState icon={<Folder size={28} />} title="No collections yet" text="Create your first collection above, then add models from your library." />}
-    <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelIds?.length ?? c.models?.length ?? 0; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className="collection-cover"><Folder size={34} aria-hidden /><span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
+    <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelIds?.length ?? c.models?.length ?? 0; const cover = c.coverModelId && c.coverThumb ? `/thumbs/${c.coverModelId}/${c.coverThumb}` : ''; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className={`collection-cover${cover ? ' has-image' : ''}`}>{cover ? <img src={cover} alt={`${c.name} cover`} loading="lazy" /> : <Folder size={34} aria-hidden />}<span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
   </section>;
 }
 

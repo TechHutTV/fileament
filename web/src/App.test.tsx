@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './App';
@@ -531,6 +531,37 @@ test('polishes empty collections and settings with active navigation and grouped
   expect(await screen.findByText('2.0 KB')).toBeInTheDocument();
   expect(await screen.findByText('No share links yet')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('aria-current', 'page');
+});
+
+test('renders selected collection cover thumbnails with a folder fallback', async () => {
+  window.history.pushState({}, '', '/collections');
+  let coverReady = false;
+  let emitThumbnail: (() => void) | undefined;
+  vi.stubGlobal('EventSource', class {
+    addEventListener(type: string, listener: EventListener) {
+      if (type === 'thumbnail') emitThumbnail = () => listener(new Event('thumbnail'));
+    }
+    close = vi.fn();
+  });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/collections')) return Response.json([
+      { id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', coverModelId: 'm1', coverThumb: coverReady ? 'card.png' : undefined, modelIds: ['m1'] },
+      { id: 'c2', name: 'Unsorted', slug: 'unsorted', description: '', modelIds: [] },
+    ]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByRole('link', { name: /fixtures/i })).toBeInTheDocument();
+  expect(screen.queryByRole('img', { name: 'Fixtures cover' })).not.toBeInTheDocument();
+  coverReady = true;
+  await act(async () => emitThumbnail?.());
+  const cover = await screen.findByRole('img', { name: 'Fixtures cover' });
+  expect(cover).toHaveAttribute('src', '/thumbs/m1/card.png');
+  const fallback = screen.getByRole('link', { name: /unsorted/i }).querySelector('.collection-cover svg');
+  expect(fallback).toBeInTheDocument();
 });
 
 test('persists the selected model color from settings', async () => {

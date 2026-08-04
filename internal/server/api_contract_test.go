@@ -156,6 +156,23 @@ func TestCollectionsExposeMembershipOrderingAndCover(t *testing.T) {
 	if collection.CoverModelID != second.ID || len(collection.Models) != 2 || collection.Models[0].ID != second.ID {
 		t.Fatalf("unexpected ordered collection: %#v", collection)
 	}
+	if _, err := app.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/collections", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	var summaries []struct {
+		Collection
+		CoverThumb string `json:"coverThumb"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &summaries); err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].CoverModelID != second.ID || summaries[0].CoverThumb != "card.png" {
+		t.Fatalf("collection cover summary missing: %#v", summaries)
+	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/collections/"+collection.ID+"/models/"+second.ID, nil)
 	req.AddCookie(cookie)
