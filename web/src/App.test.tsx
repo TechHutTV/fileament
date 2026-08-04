@@ -103,6 +103,10 @@ test('manages a dropped multi-model upload queue', async () => {
   expect(screen.getByAltText('bracket.stl thumbnail')).toHaveAttribute('src', '/thumbs/bracket.stl/card.png');
 
   fireEvent.click(screen.getByRole('button', { name: 'Remove cube.stl' }));
+  const dialog = await screen.findByRole('alertdialog', { name: 'Delete uploaded model?' });
+  expect(within(dialog).getByText(/cube\.stl.*library/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/models/cube.stl');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete model' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
   expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
 
@@ -277,6 +281,8 @@ test('refreshes collections after removing an assigned upload', async () => {
   await waitFor(() => expect(collectionFetches).toBe(2));
 
   fireEvent.click(await screen.findByRole('button', { name: 'Remove cube.stl' }));
+  const dialog = await screen.findByRole('alertdialog', { name: 'Delete uploaded model?' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete model' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/models/cube.stl'));
   await waitFor(() => expect(collectionFetches).toBe(3));
 });
@@ -684,10 +690,15 @@ test('reports a share-links query failure instead of an empty state', async () =
 
 test('shows the revoke action only for active share links', async () => {
   window.history.pushState({}, '', '/settings');
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  const calls: string[] = [];
+  let finishRevoke: () => void = () => undefined;
+  const revokeResponse = new Promise<Response>((resolve) => { finishRevoke = () => resolve(new Response(null, { status: 204 })); });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url === '/api/shares/active' && init?.method === 'DELETE') return revokeResponse;
     if (url.includes('/api/shares')) return Response.json([
       { id: 'active', token: 'active-token', scope: 'model', targetId: 'm1', label: 'Active link' },
       { id: 'revoked', token: 'revoked-token', scope: 'model', targetId: 'm1', label: 'Revoked link', revokedAt: 1 },
@@ -697,7 +708,19 @@ test('shows the revoke action only for active share links', async () => {
   renderApp();
 
   expect(await screen.findByText('Revoked')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Revoke Active link share' })).toBeInTheDocument();
+  const revoke = screen.getByRole('button', { name: 'Revoke Active link share' });
+  fireEvent.click(revoke);
+  const dialog = await screen.findByRole('alertdialog', { name: 'Revoke share link?' });
+  expect(within(dialog).getByText(/Active link/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/shares/active');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke link' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/shares/active'));
+  expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  fireEvent.keyDown(document, { key: 'Tab' });
+  expect(dialog).toHaveFocus();
+  finishRevoke();
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: 'Revoke Active link share' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Revoke Revoked link share' })).not.toBeInTheDocument();
 });
 
@@ -721,12 +744,58 @@ test('detail management actions call owner APIs and preserve viewer gate', async
   const membership = screen.getByRole('checkbox', { name: 'Fixtures' });
   expect(membership).toBeChecked();
   fireEvent.click(membership);
+  const dialog = await screen.findByRole('alertdialog', { name: 'Remove from collection?' });
+  expect(within(dialog).getByText(/Calibration Cube.*Fixtures/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/collections/c1/models/m1');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Remove from collection' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/collections/c1/models/m1'));
   fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Updated Cube' } });
   fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
   await waitFor(() => expect(calls).toContain('PATCH /api/models/m1'));
   fireEvent.click(screen.getByRole('button', { name: /create share/i }));
   await waitFor(() => expect(calls).toContain('POST /api/shares'));
+});
+
+test('confirms model, variant, and image deletion before owner API calls', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  const calls: string[] = [];
+  const managedModel = { ...model, images: [{ id: 'i1', modelId: 'm1', relPath: 'images/reference.png', sortOrder: 0 }] };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/models/m1')) return Response.json(managedModel);
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({ items: [], nextCursor: '' });
+  }));
+  renderApp();
+
+  const deleteVariant = await screen.findByRole('button', { name: 'Delete cube.stl' });
+  deleteVariant.focus();
+  fireEvent.click(deleteVariant);
+  let dialog = await screen.findByRole('alertdialog', { name: 'Delete variant?' });
+  expect(within(dialog).getByText(/cube\.stl.*Calibration Cube/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/models/m1/files/f1');
+  const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+  await waitFor(() => expect(cancel).toHaveFocus());
+  fireEvent.keyDown(document, { key: 'Tab' });
+  expect(within(dialog).getByRole('button', { name: 'Delete variant' })).toHaveFocus();
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  expect(deleteVariant).toHaveFocus();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Delete image from Calibration Cube' }));
+  dialog = await screen.findByRole('alertdialog', { name: 'Delete image?' });
+  expect(calls).not.toContain('DELETE /api/models/m1/images/i1');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete image' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/m1/images/i1'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Delete model' }));
+  dialog = await screen.findByRole('alertdialog', { name: 'Delete model?' });
+  expect(within(dialog).getByText(/Calibration Cube.*variants.*images/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/models/m1');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete model' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/m1'));
 });
 
 test('detail uses consistent variant terminology and promotes the selected download', async () => {
@@ -845,7 +914,7 @@ test('variant picker supports keyboard navigation and restores trigger focus', a
   expect(trigger).toHaveFocus();
 });
 
-test('collection detail supports metadata, cover, ordering, and deletion', async () => {
+test('collection detail supports metadata, cover, ordering, and confirmed removal', async () => {
   window.history.pushState({}, '', '/collections/fixtures');
   const second = { ...model, id: 'm2', title: 'Second', files: [{ ...model.files[0], id: 'f2', modelId: 'm2' }] };
   const calls: string[] = [];
@@ -865,7 +934,19 @@ test('collection detail supports metadata, cover, ordering, and deletion', async
   await waitFor(() => expect(calls).toContain('PATCH /api/collections/c1'));
   fireEvent.click(screen.getByRole('button', { name: /move calibration cube down/i }));
   await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/order'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Calibration Cube from collection' }));
+  let dialog = await screen.findByRole('alertdialog', { name: 'Remove from collection?' });
+  expect(within(dialog).getByText(/Calibration Cube.*Fixtures/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/collections/c1/models/m1');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Remove from collection' }));
+  await waitFor(() => expect(calls).toContain('DELETE /api/collections/c1/models/m1'));
+
   fireEvent.click(screen.getByRole('button', { name: /delete collection/i }));
+  dialog = await screen.findByRole('alertdialog', { name: 'Delete collection?' });
+  expect(within(dialog).getByText(/Fixtures.*models stay in your library/)).toBeInTheDocument();
+  expect(calls).not.toContain('DELETE /api/collections/c1');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete collection' }));
   await waitFor(() => expect(calls).toContain('DELETE /api/collections/c1'));
 });
 

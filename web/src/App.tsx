@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
-import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 
@@ -51,6 +51,7 @@ type Collection = { id: string; name: string; slug: string; description: string;
 type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
+type ConfirmationRequest = { title: string; description: string; confirmLabel: string; onConfirm: () => void };
 type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
 type UploadOrganization = 'separate' | 'grouped';
 type UploadItem = { key: string; file: File; files: File[]; title?: string; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
@@ -200,6 +201,7 @@ function Detail({ id }: { id: string }) {
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [selectedFileID, setSelectedFileID] = useState('');
   const [forceViewer, setForceViewer] = useState(false);
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   useEffect(() => { if (model?.files?.[0] && !selectedFileID) setSelectedFileID(model.files[0].id); }, [model, selectedFileID]);
   const file = model?.files.find((f) => f.id === selectedFileID) ?? model?.files?.[0];
   const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
@@ -214,10 +216,11 @@ function Detail({ id }: { id: string }) {
       qc.invalidateQueries({ queryKey: ['models'] });
     },
   });
-  const deleteFile = useMutation({ mutationFn: (fid: string) => api(`/api/models/${id}/files/${fid}`, { method: 'DELETE' }), onSuccess: invalidate });
-  const deleteImage = useMutation({ mutationFn: (imageID: string) => api(`/api/models/${id}/images/${imageID}`, { method: 'DELETE' }), onSuccess: invalidate });
+  const deleteFile = useMutation({ mutationFn: (fid: string) => api(`/api/models/${id}/files/${fid}`, { method: 'DELETE' }), onSuccess: () => { setConfirmation(null); invalidate(); } });
+  const deleteImage = useMutation({ mutationFn: (imageID: string) => api(`/api/models/${id}/images/${imageID}`, { method: 'DELETE' }), onSuccess: () => { setConfirmation(null); invalidate(); } });
   const setThumb = useMutation({ mutationFn: (fileId: string) => api(`/api/models/${id}/thumb`, { method: 'PUT', body: JSON.stringify({ fileId }) }), onSuccess: invalidate });
   const share = useMutation({ mutationFn: (body: { label: string; expiresAt: number }) => api('/api/shares', { method: 'POST', body: JSON.stringify({ scope: 'model', targetId: id, ...body }) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
+  const resetDeletionState = () => { removeModel.reset(); deleteFile.reset(); deleteImage.reset(); };
   if (isLoading) return <section className="content"><Empty text="Loading model" /></section>;
   if (isError || !model) return <section className="content"><Empty text="Model not found" /></section>;
   return (
@@ -235,18 +238,19 @@ function Detail({ id }: { id: string }) {
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Variants and downloads</h2>
-        {model.files.map((f) => <ModelFileRow key={f.id} modelID={model.id} file={f} busy={renameFile.isPending} onRename={async (filename) => { await renameFile.mutateAsync({ fid: f.id, filename }); }} onUseThumbnail={() => setThumb.mutate(f.id)} onDelete={() => deleteFile.mutate(f.id)} />)}
+        {model.files.map((f) => <ModelFileRow key={f.id} modelID={model.id} file={f} busy={renameFile.isPending} onRename={async (filename) => { await renameFile.mutateAsync({ fid: f.id, filename }); }} onUseThumbnail={() => setThumb.mutate(f.id)} onDelete={() => { resetDeletionState(); setConfirmation({ title: 'Delete variant?', description: `Delete “${f.filename}” from “${model.title}”? This cannot be undone.`, confirmLabel: 'Delete variant', onConfirm: () => deleteFile.mutate(f.id) }); }} />)}
         <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
-        <div className="images">{model.images?.map((img) => <figure key={img.id}><img src={`/images/${model.id}/${img.id}`} alt={`${model.title} image`} /><button type="button" className="icon danger" onClick={() => deleteImage.mutate(img.id)}><X size={16} /></button></figure>)}</div>
+        <div className="images">{model.images?.map((img) => <figure key={img.id}><img src={`/images/${model.id}/${img.id}`} alt={`${model.title} image`} /><button type="button" className="icon danger" aria-label={`Delete image from ${model.title}`} onClick={() => { resetDeletionState(); setConfirmation({ title: 'Delete image?', description: `Delete this image from “${model.title}”? This cannot be undone.`, confirmLabel: 'Delete image', onConfirm: () => deleteImage.mutate(img.id) }); }}><X size={16} /></button></figure>)}</div>
         <UploadInline label="Add images" path={`/api/models/${id}/images`} onDone={invalidate} />
         <h2>Collections</h2>
         <CollectionMembership collections={collections.data ?? []} model={model} />
         <h2>Share</h2>
         <ShareForm onCreate={(body) => share.mutate(body)} />
         {shares.data?.filter((s) => s.scope === 'model' && s.targetId === id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}
-        <button type="button" className="danger" onClick={() => removeModel.mutate()}><Trash2 size={16} />Delete model</button>
+        <button type="button" className="danger" onClick={() => { resetDeletionState(); setConfirmation({ title: 'Delete model?', description: `Delete “${model.title}” and all of its variants, images, and metadata? This cannot be undone.`, confirmLabel: 'Delete model', onConfirm: () => removeModel.mutate() }); }}><Trash2 size={16} />Delete model</button>
       </aside>
+      <ConfirmationDialog request={confirmation} busy={removeModel.isPending || deleteFile.isPending || deleteImage.isPending} error={removeModel.isError || deleteFile.isError || deleteImage.isError ? 'This item could not be deleted. Try again.' : undefined} onCancel={() => setConfirmation(null)} />
     </section>
   );
 }
@@ -281,7 +285,7 @@ function ModelFileRow({ modelID, file, busy, onRename, onUseThumbnail, onDelete 
       setError('Could not rename this variation. Try again.');
     }
   };
-  return <div className={`file model-file${editing ? ' editing' : ''}`}><div className="model-file-copy">{editing ? <form className="model-file-rename" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="model-file-rename-field"><input autoFocus required maxLength={255 - extension.length} aria-label={`Variation name for ${file.filename}`} value={name} onChange={(event) => setName(event.target.value)} /><span className="model-file-extension">{extension}</span></div><div className="model-file-rename-actions"><button type="submit" className="icon" aria-label="Save variation name" title="Save" disabled={busy || !name.trim()}><Check size={16} /></button><button type="button" className="icon" aria-label="Cancel renaming" title="Cancel" disabled={busy} onClick={cancelEditing}><X size={16} /></button></div>{error && <p className="model-file-rename-error" role="alert">{error}</p>}</form> : <a href={`/files/${modelID}/${file.id}`}><Download size={16} /><span>{file.filename}</span></a>}<small>{file.triangleCount} tris · {dims(file)} · {formatBytes(file.sizeBytes)}</small></div>{!editing && <div className="model-file-actions"><button type="button" className="icon" aria-label={`Rename ${file.filename}`} title="Rename file" disabled={busy} onClick={startEditing}><Pencil size={16} /></button><button type="button" className="icon" title="Use thumbnail" disabled={busy} onClick={onUseThumbnail}><Check size={16} /></button><button type="button" className="icon danger" title="Delete file" disabled={busy} onClick={onDelete}><Trash2 size={16} /></button></div>}</div>;
+  return <div className={`file model-file${editing ? ' editing' : ''}`}><div className="model-file-copy">{editing ? <form className="model-file-rename" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="model-file-rename-field"><input autoFocus required maxLength={255 - extension.length} aria-label={`Variation name for ${file.filename}`} value={name} onChange={(event) => setName(event.target.value)} /><span className="model-file-extension">{extension}</span></div><div className="model-file-rename-actions"><button type="submit" className="icon" aria-label="Save variation name" title="Save" disabled={busy || !name.trim()}><Check size={16} /></button><button type="button" className="icon" aria-label="Cancel renaming" title="Cancel" disabled={busy} onClick={cancelEditing}><X size={16} /></button></div>{error && <p className="model-file-rename-error" role="alert">{error}</p>}</form> : <a href={`/files/${modelID}/${file.id}`}><Download size={16} /><span>{file.filename}</span></a>}<small>{file.triangleCount} tris · {dims(file)} · {formatBytes(file.sizeBytes)}</small></div>{!editing && <div className="model-file-actions"><button type="button" className="icon" aria-label={`Rename ${file.filename}`} title="Rename file" disabled={busy} onClick={startEditing}><Pencil size={16} /></button><button type="button" className="icon" title="Use thumbnail" disabled={busy} onClick={onUseThumbnail}><Check size={16} /></button><button type="button" className="icon danger" aria-label={`Delete ${file.filename}`} title="Delete file" disabled={busy} onClick={onDelete}><Trash2 size={16} /></button></div>}</div>;
 }
 
 function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<Model>) => void }) {
@@ -307,6 +311,9 @@ function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<M
 function UploadPage() {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
+  const [itemToRemove, setItemToRemove] = useState<UploadItem | null>(null);
+  const [removingKey, setRemovingKey] = useState('');
+  const [removeError, setRemoveError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [collectionID, setCollectionID] = useState('');
   const [organization, setOrganization] = useState<UploadOrganization | ''>('');
@@ -424,8 +431,10 @@ function UploadPage() {
     cancelled.current.add(item.key);
     if (!item.model) {
       setItems((current) => current.filter((candidate) => candidate.key !== item.key));
-      return;
+      return true;
     }
+    setRemovingKey(item.key);
+    setRemoveError('');
     updateItem(item.key, { status: 'removing' });
     try {
       await api(`/api/models/${item.model.id}`, { method: 'DELETE' });
@@ -433,9 +442,13 @@ function UploadPage() {
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
       qc.invalidateQueries({ queryKey: ['collections'] });
+      return true;
     } catch {
       updateItem(item.key, { status: 'error', error: 'Could not remove this model.' });
+      setRemoveError('This model could not be deleted. Try again.');
+      return false;
     } finally {
+      setRemovingKey('');
       cancelled.current.delete(item.key);
     }
   };
@@ -514,12 +527,13 @@ function UploadPage() {
         const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
         return <article className={`upload-card ${item.status}`} key={item.key}>
           <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${itemName} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
-          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { void removeItem(item); }} disabled={item.status === 'removing'}><X size={17} /></button>
+          <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { if (item.model) { setRemoveError(''); setItemToRemove(item); } else { void removeItem(item); } }} disabled={item.status === 'removing'}><X size={17} /></button>
           <div className="upload-card-body"><div><h3>{itemName}</h3><p>{item.files.length > 1 ? `${item.files.length} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
         </article>;
       })}</div>
     </section>}
     {items.length > 0 && <footer className="upload-finish"><div><strong>{active ? 'Uploads in progress' : `${completed} ${completed === 1 ? 'model' : 'models'} added`}</strong><span>{active ? 'You can keep adding files while these finish.' : 'Everything is saved to your library.'}</span></div><button type="button" disabled={active} onClick={() => navigate('/')}><Check size={18} />Finish and view library</button></footer>}
+    <ConfirmationDialog request={itemToRemove ? { title: 'Delete uploaded model?', description: `Delete “${itemToRemove.model?.title || itemToRemove.title || itemToRemove.file.name}” from your library? This cannot be undone.`, confirmLabel: 'Delete model', onConfirm: () => { void removeItem(itemToRemove).then((removed) => { if (removed) setItemToRemove(null); }); } } : null} busy={!!itemToRemove && removingKey === itemToRemove.key} error={removeError || undefined} onCancel={() => { setRemoveError(''); setItemToRemove(null); }} />
   </section>;
 }
 
@@ -527,7 +541,14 @@ function SettingsPage() {
   const qc = useQueryClient();
   const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
   const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
-  const revoke = useMutation({ mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
+  const [shareToRevoke, setShareToRevoke] = useState<Share | null>(null);
+  const revoke = useMutation({
+    mutationFn: (id: string) => api(`/api/shares/${id}`, { method: 'DELETE' }),
+    onSuccess: (_, id) => {
+      qc.setQueryData<Share[]>(['shares'], (current) => current?.map((share) => share.id === id ? { ...share, revokedAt: Math.floor(Date.now() / 1000) } : share));
+      setShareToRevoke(null);
+    },
+  });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [modelColor, setModelColor] = useState(getModelColor);
@@ -591,8 +612,9 @@ function SettingsPage() {
       {sharesError && <Empty text="Share links could not be loaded" />}
       {sharesLoading && <Empty text="Loading share links" />}
       {!sharesLoading && !sharesError && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
-      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small>{!s.revokedAt && <button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => revoke.mutate(s.id)}><Trash2 size={16} /></button>}</div>)}
+      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small>{!s.revokedAt && <button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => { revoke.reset(); setShareToRevoke(s); }}><Trash2 size={16} /></button>}</div>)}
     </section>
+    <ConfirmationDialog request={shareToRevoke ? { title: 'Revoke share link?', description: `Revoke “${shareToRevoke.label || shareToRevoke.scope}”? Anyone with this link will immediately lose access.`, confirmLabel: 'Revoke link', onConfirm: () => revoke.mutate(shareToRevoke.id) } : null} busy={revoke.isPending} error={revoke.isError ? 'This share link could not be revoked. Try again.' : undefined} onCancel={() => setShareToRevoke(null)} />
   </section>;
 }
 
@@ -622,14 +644,16 @@ function CollectionsPage() {
 
 function CollectionDetail({ slug }: { slug: string }) {
   const qc = useQueryClient();
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const { data } = useQuery<Collection>({ queryKey: ['collection', slug], queryFn: () => api(`/api/collections/${slug}`) });
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['collection', slug] }); qc.invalidateQueries({ queryKey: ['collections'] }); };
   const patch = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: (updated) => { qc.setQueryData(['collection', slug], updated); qc.invalidateQueries({ queryKey: ['collections'] }); if (updated.slug !== slug) navigate(`/collections/${updated.slug}`, true); } });
   const reorder = useMutation({ mutationFn: (modelIds: string[]) => api(`/api/collections/${data?.id}/order`, { method: 'PUT', body: JSON.stringify({ modelIds }) }), onSuccess: invalidate });
-  const removeMember = useMutation({ mutationFn: (modelID: string) => api(`/api/collections/${data?.id}/models/${modelID}`, { method: 'DELETE' }), onSuccess: invalidate });
+  const removeMember = useMutation({ mutationFn: (modelID: string) => api(`/api/collections/${data?.id}/models/${modelID}`, { method: 'DELETE' }), onSuccess: () => { setConfirmation(null); invalidate(); } });
   const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => navigate('/collections') });
   const share = useMutation({ mutationFn: (body: { label: string; expiresAt: number }) => api('/api/shares', { method: 'POST', body: JSON.stringify({ scope: 'collection', targetId: data?.id, ...body }) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
+  const resetRemovalState = () => { remove.reset(); removeMember.reset(); };
   if (!data) return <section className="content"><Empty text="Loading collection" /></section>;
   const move = (index: number, delta: number) => {
     const modelIds = [...(data.modelIds ?? data.models?.map((model) => model.id) ?? [])];
@@ -640,9 +664,10 @@ function CollectionDetail({ slug }: { slug: string }) {
   };
   return <section className="content">
     <CollectionForm collection={data} onSave={(body) => patch.mutate(body)} />
-    <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => remove.mutate()}><Trash2 size={16} />Delete collection</button></div>
+    <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => { resetRemovalState(); setConfirmation({ title: 'Delete collection?', description: `Delete “${data.name}”? Its models stay in your library.`, confirmLabel: 'Delete collection', onConfirm: () => remove.mutate() }); }}><Trash2 size={16} />Delete collection</button></div>
     {shares.data?.filter((s) => s.scope === 'collection' && s.targetId === data.id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}
-    <div className="collection-models">{data.models?.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === (data.models?.length ?? 0) - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => removeMember.mutate(model.id)}><Trash2 size={16} /></button></div></div>)}</div>
+    <div className="collection-models">{data.models?.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === (data.models?.length ?? 0) - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => { resetRemovalState(); setConfirmation({ title: 'Remove from collection?', description: `Remove “${model.title}” from “${data.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => removeMember.mutate(model.id) }); }}><Trash2 size={16} /></button></div></div>)}</div>
+    <ConfirmationDialog request={confirmation} busy={remove.isPending || removeMember.isPending} error={remove.isError || removeMember.isError ? 'This change could not be completed. Try again.' : undefined} onCancel={() => setConfirmation(null)} />
   </section>;
 }
 
@@ -664,8 +689,9 @@ function PublicModel({ model, token }: { model: Model; token: string }) {
 
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {
   const qc = useQueryClient();
-  const mutate = useMutation({ mutationFn: ({ collectionID, has }: { collectionID: string; has: boolean }) => api(`/api/collections/${collectionID}/models/${model.id}`, { method: has ? 'DELETE' : 'PUT' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['collections'] }) });
-  return <div className="checks">{collections.map((c) => { const has = c.modelIds?.includes(model.id) ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => mutate.mutate({ collectionID: c.id, has })} />{c.name}</label>; })}</div>;
+  const [collectionToLeave, setCollectionToLeave] = useState<Collection | null>(null);
+  const mutate = useMutation({ mutationFn: ({ collectionID, has }: { collectionID: string; has: boolean }) => api(`/api/collections/${collectionID}/models/${model.id}`, { method: has ? 'DELETE' : 'PUT' }), onSuccess: () => { setCollectionToLeave(null); qc.invalidateQueries({ queryKey: ['collections'] }); } });
+  return <div className="checks">{collections.map((c) => { const has = c.modelIds?.includes(model.id) ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => { mutate.reset(); if (has) setCollectionToLeave(c); else mutate.mutate({ collectionID: c.id, has: false }); }} />{c.name}</label>; })}<ConfirmationDialog request={collectionToLeave ? { title: 'Remove from collection?', description: `Remove “${model.title}” from “${collectionToLeave.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => mutate.mutate({ collectionID: collectionToLeave.id, has: true }) } : null} busy={mutate.isPending} error={mutate.isError ? 'The model could not be removed from this collection. Try again.' : undefined} onCancel={() => setCollectionToLeave(null)} /></div>;
 }
 
 function CollectionForm({ collection, onSave }: { collection?: Collection; onSave: (body: Partial<Collection>) => void }) {
@@ -716,6 +742,61 @@ function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; 
 
 function SectionHeading({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
   return <header className="section-heading"><span className="surface-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header>;
+}
+
+function ConfirmationDialog({ request, busy, error, onCancel }: { request: ConfirmationRequest | null; busy: boolean; error?: string; onCancel: () => void }) {
+  const open = !!request;
+  const titleID = useId();
+  const descriptionID = useId();
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const cancelAction = useRef(onCancel);
+  const busyState = useRef(busy);
+  cancelAction.current = onCancel;
+  busyState.current = busy;
+  useEffect(() => {
+    if (!open) return undefined;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focus = window.setTimeout(() => cancelButton.current?.focus(), 0);
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyState.current) {
+        event.preventDefault();
+        cancelAction.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const controls = [cancelButton.current, confirmButton.current].filter((button): button is HTMLButtonElement => !!button && !button.disabled);
+      if (controls.length === 0) {
+        event.preventDefault();
+        dialog.current?.focus();
+        return;
+      }
+      const current = controls.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.shiftKey ? (current <= 0 ? controls.length - 1 : current - 1) : (current + 1) % controls.length;
+      event.preventDefault();
+      controls[next].focus();
+    };
+    document.addEventListener('keydown', keydown);
+    return () => {
+      window.clearTimeout(focus);
+      document.removeEventListener('keydown', keydown);
+      previousFocus?.focus();
+    };
+  }, [open]);
+  if (!request) return null;
+  return <div className="confirmation-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+    <div ref={dialog} className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} tabIndex={-1}>
+      <span className="confirmation-icon"><Trash2 size={22} aria-hidden /></span>
+      <h2 id={titleID}>{request.title}</h2>
+      <p id={descriptionID}>{request.description}</p>
+      {error && <p className="error" role="alert">{error}</p>}
+      <div className="confirmation-actions">
+        <button ref={cancelButton} type="button" className="confirmation-cancel" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button ref={confirmButton} type="button" className="danger" disabled={busy} onClick={request.onConfirm}>{busy ? 'Working…' : request.confirmLabel}</button>
+      </div>
+    </div>
+  </div>;
 }
 
 function VariantPicker({ files, selectedFileID, onSelect, thumbnailURL }: { files: ModelFile[]; selectedFileID: string; onSelect: (fileID: string) => void; thumbnailURL: (file: ModelFile) => string }) {
