@@ -444,6 +444,8 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	id := chi.URLParam(r, "id")
 	if _, err := a.getModel(id); err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -922,6 +924,8 @@ func (a *App) ingestGroupedStagedUploads(uploads []stagedUpload, title string) (
 }
 
 func (a *App) persistStagedModel(stage string, model Model) error {
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	root := filepath.Join(a.cfg.DataDir, "models", model.ID)
 	if err := os.Rename(stage, root); err != nil {
 		return err

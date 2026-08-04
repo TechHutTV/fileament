@@ -6,6 +6,7 @@ import { getModelColor, saveModelColor } from './viewerPreferences';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
+const UPLOAD_CONCURRENCY = 3;
 const NAVIGATION_EVENT = 'fileament:navigate';
 const client = new QueryClient();
 const MODEL_COLOR_PRESETS = [
@@ -314,6 +315,9 @@ function UploadPage() {
   const [itemToRemove, setItemToRemove] = useState<UploadItem | null>(null);
   const [removingKey, setRemovingKey] = useState('');
   const [removeError, setRemoveError] = useState('');
+  const [variantToRemove, setVariantToRemove] = useState<{ item: UploadItem; file: ModelFile } | null>(null);
+  const [removingVariantID, setRemovingVariantID] = useState('');
+  const [variantRemoveError, setVariantRemoveError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [collectionID, setCollectionID] = useState('');
   const [organization, setOrganization] = useState<UploadOrganization | ''>('');
@@ -324,11 +328,21 @@ function UploadPage() {
   const input = useRef<HTMLInputElement>(null);
   const pending = useRef(new Set<string>());
   const cancelled = useRef(new Set<string>());
-  const uploadChain = useRef<Promise<void>>(Promise.resolve());
+  const uploadQueue = useRef<UploadItem[]>([]);
+  const activeUploads = useRef(0);
+  const collectionAssignmentTails = useRef(new Map<string, Promise<void>>());
+  const collectionAssignmentTurns = useRef(new Map<string, { wait: Promise<void>; release: () => void }>());
   const organizationSelected = organization !== '';
 
   const updateItem = (key: string, update: Partial<UploadItem>) => {
     setItems((current) => current.map((item) => item.key === key ? { ...item, ...update } : item));
+  };
+
+  const releaseCollectionAssignment = (key: string) => {
+    const turn = collectionAssignmentTurns.current.get(key);
+    if (!turn) return;
+    collectionAssignmentTurns.current.delete(key);
+    turn.release();
   };
 
   const uploadItem = async (item: UploadItem) => {
@@ -362,6 +376,8 @@ function UploadPage() {
       let collectionError: string | undefined;
       let collectionChanged = false;
       if (item.collectionID) {
+        await collectionAssignmentTurns.current.get(item.key)?.wait;
+        if (await discardIfCancelled()) return;
         try {
           await api(`/api/collections/${item.collectionID}/models/${model.id}`, { method: 'PUT' });
           collectionChanged = true;
@@ -387,8 +403,27 @@ function UploadPage() {
         updateItem(item.key, { status: 'error', error: 'Upload failed. Remove it and try again.' });
       }
     } finally {
+      releaseCollectionAssignment(item.key);
       pending.current.delete(item.key);
       cancelled.current.delete(item.key);
+    }
+  };
+
+  const drainUploads = () => {
+    while (activeUploads.current < UPLOAD_CONCURRENCY) {
+      const item = uploadQueue.current.shift();
+      if (!item) return;
+      if (cancelled.current.has(item.key)) {
+        releaseCollectionAssignment(item.key);
+        pending.current.delete(item.key);
+        cancelled.current.delete(item.key);
+        continue;
+      }
+      activeUploads.current += 1;
+      void uploadItem(item).finally(() => {
+        activeUploads.current -= 1;
+        drainUploads();
+      });
     }
   };
 
@@ -413,18 +448,18 @@ function UploadPage() {
       collectionID: collectionID || undefined,
     }));
     if (queued.length === 0) return;
+    queued.forEach((item) => {
+      if (!item.collectionID) return;
+      const wait = collectionAssignmentTails.current.get(item.collectionID) ?? Promise.resolve();
+      let release: () => void = () => undefined;
+      const complete = new Promise<void>((resolve) => { release = resolve; });
+      collectionAssignmentTails.current.set(item.collectionID, wait.then(() => complete));
+      collectionAssignmentTurns.current.set(item.key, { wait, release });
+    });
     queued.forEach((item) => pending.current.add(item.key));
     setItems((current) => [...current, ...queued]);
-    queued.forEach((item) => {
-      uploadChain.current = uploadChain.current.then(async () => {
-        if (cancelled.current.has(item.key)) {
-          pending.current.delete(item.key);
-          cancelled.current.delete(item.key);
-          return;
-        }
-        await uploadItem(item);
-      });
-    });
+    uploadQueue.current.push(...queued);
+    drainUploads();
   };
 
   const removeItem = async (item: UploadItem) => {
@@ -453,6 +488,36 @@ function UploadPage() {
     }
   };
 
+  const removeVariant = async (item: UploadItem, file: ModelFile) => {
+    if (!item.model) return false;
+    setRemovingVariantID(file.id);
+    setVariantRemoveError('');
+    try {
+      await api(`/api/models/${item.model.id}/files/${file.id}`, { method: 'DELETE' });
+      setItems((current) => current.map((candidate) => {
+        if (candidate.key !== item.key || !candidate.model) return candidate;
+        const files = candidate.model.files.filter((variant) => variant.id !== file.id);
+        const deletedThumb = fileThumbName(file);
+        const model = {
+          ...candidate.model,
+          files,
+          totalBytes: Math.max(candidate.model.totalBytes - file.sizeBytes, 0),
+          primaryThumb: candidate.model.primaryThumb === deletedThumb ? undefined : candidate.model.primaryThumb,
+        };
+        return { ...candidate, model, status: files.some((variant) => fileThumbName(variant)) ? 'ready' : 'processing' };
+      }));
+      qc.invalidateQueries({ queryKey: ['models'] });
+      qc.invalidateQueries({ queryKey: ['storage'] });
+      qc.invalidateQueries({ queryKey: ['collections'] });
+      return true;
+    } catch {
+      setVariantRemoveError('This variant could not be deleted. Try again.');
+      return false;
+    } finally {
+      setRemovingVariantID('');
+    }
+  };
+
   useEffect(() => {
     if (typeof EventSource === 'undefined') return undefined;
     const events = new EventSource('/api/events');
@@ -468,6 +533,7 @@ function UploadPage() {
   useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
 
   const active = items.some((item) => item.status === 'queued' || item.status === 'uploading' || item.status === 'removing');
+  const busy = active || !!removingVariantID;
   const completed = items.filter((item) => item.status === 'ready' || item.status === 'processing').length;
   return <section className="upload-page">
     <header className="upload-header">
@@ -521,19 +587,35 @@ function UploadPage() {
       <div className="queue-heading"><div><span className="eyebrow">Upload queue</span><h2>{items.length} {items.length === 1 ? 'model' : 'models'}</h2></div><span>{completed} uploaded</span></div>
       <div className="upload-grid">{items.map((item) => {
         const itemName = item.model?.title || item.title || item.file.name;
-        const itemBytes = item.files.reduce((total, file) => total + file.size, 0);
-        const thumbnail = item.model?.primaryThumb ? `/thumbs/${item.model.id}/${item.model.primaryThumb}` : '';
+        const modelFiles = item.model?.files;
+        const variantCount = modelFiles?.length ?? item.files.length;
+        const itemBytes = item.model?.totalBytes ?? item.files.reduce((total, file) => total + file.size, 0);
+        const fallbackThumb = modelFiles?.map((file) => fileThumbName(file)).find(Boolean);
+        const thumbnailName = item.model?.primaryThumb || fallbackThumb;
+        const thumbnail = item.model && thumbnailName ? `/thumbs/${item.model.id}/${thumbnailName}` : '';
+        const grouped = Math.max(item.files.length, variantCount) > 1;
+        const variants: { key: string; filename: string; sizeBytes: number; format: string; thumb: string; file?: ModelFile }[] = modelFiles
+          ? modelFiles.map((file) => ({ key: file.id, filename: file.filename, sizeBytes: file.sizeBytes, format: file.format.toUpperCase(), thumb: fileThumbName(file), file }))
+          : item.files.map((file, index) => ({ key: `${file.name}-${index}`, filename: file.name, sizeBytes: file.size, format: file.name.split('.').pop()?.toUpperCase() ?? '', thumb: '' }));
         const label = item.status === 'queued' ? 'Queued' : item.status === 'uploading' ? 'Uploading' : item.status === 'processing' ? 'Generating preview' : item.status === 'ready' ? 'Ready' : item.status === 'removing' ? 'Removing' : 'Needs attention';
         const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
-        return <article className={`upload-card ${item.status}`} key={item.key}>
+        return <article className={`upload-card ${item.status}${grouped ? ' grouped' : ''}`} key={item.key}>
           <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${itemName} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
           <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { if (item.model) { setRemoveError(''); setItemToRemove(item); } else { void removeItem(item); } }} disabled={item.status === 'removing'}><X size={17} /></button>
-          <div className="upload-card-body"><div><h3>{itemName}</h3><p>{item.files.length > 1 ? `${item.files.length} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
+          <div className="upload-card-body"><div><h3>{itemName}</h3><p>{variantCount > 1 ? `${variantCount} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
+          {grouped && <section className="upload-variants" role="region" aria-label={`${itemName} variants`}>
+            <div className="upload-variants-heading"><strong>{variantCount} variants</strong><span>Preview each file and remove anything you do not want to keep.</span></div>
+            <div className="upload-variant-grid">{variants.map((variant) => <article className="upload-variant" key={variant.key}>
+              <div className="upload-variant-preview">{item.model && variant.thumb ? <img src={`/thumbs/${item.model.id}/${variant.thumb}`} alt={`${variant.filename} variant preview`} /> : <div className={item.model ? 'loading' : undefined} aria-label={item.model ? `${variant.filename} preview rendering` : undefined}><Box size={22} aria-hidden /><span className={item.model ? 'visually-hidden' : undefined}>{item.model ? 'Preview pending' : 'Waiting'}</span></div>}</div>
+              <div className="upload-variant-copy"><strong title={variant.filename}>{variant.filename}</strong><small>{variant.format} · {formatBytes(variant.sizeBytes)}</small></div>
+              {variant.file && modelFiles && modelFiles.length > 1 && <button type="button" className="icon upload-variant-remove" aria-label={`Remove ${variant.filename} variant`} title={`Remove ${variant.filename}`} disabled={!!removingVariantID} onClick={() => { setVariantRemoveError(''); setVariantToRemove({ item, file: variant.file! }); }}><Trash2 size={15} /></button>}
+            </article>)}</div>
+          </section>}
         </article>;
       })}</div>
     </section>}
-    {items.length > 0 && <footer className="upload-finish"><div><strong>{active ? 'Uploads in progress' : `${completed} ${completed === 1 ? 'model' : 'models'} added`}</strong><span>{active ? 'You can keep adding files while these finish.' : 'Everything is saved to your library.'}</span></div><button type="button" disabled={active} onClick={() => navigate('/')}><Check size={18} />Finish and view library</button></footer>}
-    <ConfirmationDialog request={itemToRemove ? { title: 'Delete uploaded model?', description: `Delete “${itemToRemove.model?.title || itemToRemove.title || itemToRemove.file.name}” from your library? This cannot be undone.`, confirmLabel: 'Delete model', onConfirm: () => { void removeItem(itemToRemove).then((removed) => { if (removed) setItemToRemove(null); }); } } : null} busy={!!itemToRemove && removingKey === itemToRemove.key} error={removeError || undefined} onCancel={() => { setRemoveError(''); setItemToRemove(null); }} />
+    {items.length > 0 && <footer className="upload-finish"><div><strong>{active ? 'Uploads in progress' : removingVariantID ? 'Updating variants' : `${completed} ${completed === 1 ? 'model' : 'models'} added`}</strong><span>{active ? 'You can keep adding files while these finish.' : removingVariantID ? 'Saving your variant changes.' : 'Everything is saved to your library.'}</span></div><button type="button" disabled={busy} onClick={() => navigate('/')}><Check size={18} />Finish and view library</button></footer>}
+    <ConfirmationDialog request={variantToRemove ? { title: 'Delete variant?', description: `Delete “${variantToRemove.file.filename}” from “${variantToRemove.item.model?.title || variantToRemove.item.title || variantToRemove.item.file.name}”? This cannot be undone.`, confirmLabel: 'Delete variant', onConfirm: () => { void removeVariant(variantToRemove.item, variantToRemove.file).then((removed) => { if (removed) setVariantToRemove(null); }); } } : itemToRemove ? { title: 'Delete uploaded model?', description: `Delete “${itemToRemove.model?.title || itemToRemove.title || itemToRemove.file.name}” from your library? This cannot be undone.`, confirmLabel: 'Delete model', onConfirm: () => { void removeItem(itemToRemove).then((removed) => { if (removed) setItemToRemove(null); }); } } : null} busy={variantToRemove ? removingVariantID === variantToRemove.file.id : !!itemToRemove && removingKey === itemToRemove.key} error={(variantToRemove ? variantRemoveError : removeError) || undefined} onCancel={() => { setVariantRemoveError(''); setVariantToRemove(null); setRemoveError(''); setItemToRemove(null); }} />
   </section>;
 }
 

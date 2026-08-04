@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -55,6 +57,129 @@ endsolid p`,
 	}
 	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", id, "bundle.zip")); !os.IsNotExist(err) {
 		t.Fatalf("source archive should not be retained: %v", err)
+	}
+}
+
+func TestConcurrentModelUploadsPersistAllModels(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	const uploadCount = 6
+	type uploadRequest struct {
+		body        *bytes.Buffer
+		contentType string
+	}
+	requests := make([]uploadRequest, uploadCount)
+	for i := range requests {
+		body, contentType := multipartFile(t, fmt.Sprintf("part-%d.stl", i), []byte(validSTL()))
+		requests[i] = uploadRequest{body: body, contentType: contentType}
+	}
+
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, uploadCount)
+	var wg sync.WaitGroup
+	for _, upload := range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest(http.MethodPost, "/api/models", upload.body)
+			req.Header.Set("Content-Type", upload.contentType)
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			app.Router().ServeHTTP(rec, req)
+			results <- rec
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for rec := range results {
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("concurrent upload status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		var created Model
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", created.ID, "model.json")); err != nil {
+			t.Fatalf("sidecar missing for %s: %v", created.ID, err)
+		}
+	}
+	var models, files int
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM models`).Scan(&models); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if models != uploadCount || files != uploadCount {
+		t.Fatalf("models=%d files=%d, want %d each", models, files, uploadCount)
+	}
+}
+
+func TestConcurrentCollectionAssignmentsPreserveOrderingAndSidecar(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	req := httptest.NewRequest(http.MethodPost, "/api/collections", strings.NewReader(`{"name":"Concurrent"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var collection Collection
+	if err := json.Unmarshal(rec.Body.Bytes(), &collection); err != nil {
+		t.Fatal(err)
+	}
+
+	const modelCount = 6
+	modelIDs := make([]string, modelCount)
+	for i := range modelIDs {
+		modelIDs[i] = uploadSTLModel(t, app, cookie, fmt.Sprintf("member-%d.stl", i), "").ID
+	}
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, modelCount)
+	var wg sync.WaitGroup
+	for _, modelID := range modelIDs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest(http.MethodPut, "/api/collections/"+collection.ID+"/models/"+modelID, nil)
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			app.Router().ServeHTTP(rec, req)
+			results <- rec
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for rec := range results {
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("concurrent assignment status = %d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	var members, distinctOrders int
+	if err := app.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT sort_order) FROM collection_models WHERE collection_id = ?`, collection.ID).Scan(&members, &distinctOrders); err != nil {
+		t.Fatal(err)
+	}
+	if members != modelCount || distinctOrders != modelCount {
+		t.Fatalf("members=%d distinct sort orders=%d, want %d each", members, distinctOrders, modelCount)
+	}
+	b, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "collections.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sidecar []Collection
+	if err := json.Unmarshal(b, &sidecar); err != nil {
+		t.Fatal(err)
+	}
+	if len(sidecar) != 1 || len(sidecar[0].ModelIDs) != modelCount {
+		t.Fatalf("collections sidecar = %#v", sidecar)
 	}
 }
 

@@ -144,6 +144,8 @@ func (a *App) listCollections() ([]Collection, error) {
 }
 
 func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	var req Collection
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -181,6 +183,8 @@ func (a *App) handleGetCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	id := chi.URLParam(r, "id")
 	var req Collection
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -215,6 +219,8 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	res, err := a.db.Exec(`DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -232,6 +238,8 @@ func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	id, mid := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
 	if _, err := a.getCollection(id); err != nil {
 		writeError(w, http.StatusNotFound, errors.New("collection not found"))
@@ -255,6 +263,8 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	id, modelID := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -287,6 +297,8 @@ func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request
 }
 
 func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Request) {
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
 	id := chi.URLParam(r, "id")
 	collection, err := a.getCollection(id)
 	if err != nil {

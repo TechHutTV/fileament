@@ -114,6 +114,47 @@ test('manages a dropped multi-model upload queue', async () => {
   expect(window.location.pathname).toBe('/');
 });
 
+test('runs up to three dropped model uploads concurrently', async () => {
+  window.history.pushState({}, '', '/upload');
+  const started: string[] = [];
+  const finish = new Map<string, () => void>();
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/models' && init?.method === 'POST') {
+      const file = (init.body as FormData).get('file') as File;
+      started.push(file.name);
+      return new Promise<Response>((resolve) => {
+        finish.set(file.name, () => resolve(Response.json({
+          ...model,
+          id: file.name,
+          title: file.name,
+          primaryThumb: 'card.png',
+          files: [{ ...model.files[0], id: `${file.name}-file`, modelId: file.name, filename: file.name }],
+        }, { status: 201 })));
+      });
+    }
+    if (url.includes('/api/collections') || url.includes('/api/tags')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  await chooseSeparateModels();
+  const files = ['one.stl', 'two.stl', 'three.stl', 'four.stl'].map((name) => new File([name], name, { type: 'model/stl' }));
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files } });
+
+  await waitFor(() => expect(started).toEqual(['one.stl', 'two.stl', 'three.stl']));
+  expect(started).not.toContain('four.stl');
+  await act(async () => { finish.get('one.stl')?.(); });
+  await waitFor(() => expect(started).toEqual(['one.stl', 'two.stl', 'three.stl', 'four.stl']));
+  await act(async () => {
+    finish.get('two.stl')?.();
+    finish.get('three.stl')?.();
+    finish.get('four.stl')?.();
+  });
+  expect(await screen.findByAltText('four.stl thumbnail')).toBeInTheDocument();
+});
+
 test('requires loose file organization before files can be selected', async () => {
   window.history.pushState({}, '', '/upload');
   const uploads: { path: string; files: string[] }[] = [];
@@ -188,6 +229,70 @@ test('creates one atomic model when loose files are grouped as variants', async 
   await waitFor(() => expect(groupedUploads).toEqual([{ title: 'OpenGrid Baseplate', files: ['baseplate-2x2.stl', 'baseplate-3x3.stl'] }]));
   expect(singleUploads).toEqual([]);
   expect(await screen.findByText('OpenGrid Baseplate')).toBeInTheDocument();
+  const pendingPreview = within(screen.getByRole('region', { name: 'OpenGrid Baseplate variants' })).getByLabelText('baseplate-2x2.stl preview rendering');
+  expect(pendingPreview).toHaveClass('loading');
+  expect(within(pendingPreview).getByText('Preview pending')).toHaveClass('visually-hidden');
+});
+
+test('previews and removes an individual variant from a grouped upload', async () => {
+  window.history.pushState({}, '', '/upload');
+  const calls: string[] = [];
+  const files = [new File(['variant-a'], 'baseplate-2x2.stl'), new File(['variant-b'], 'baseplate-3x3.stl')];
+  let finishUpload: (response: Response) => void = () => undefined;
+  const upload = new Promise<Response>((resolve) => { finishUpload = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([]);
+    if (url === '/api/models/grouped' && init?.method === 'POST') {
+      return upload;
+    }
+    if (url === '/api/models/opengrid-baseplate/files/f2' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    return Response.json({});
+  }));
+  renderApp();
+
+  fireEvent.click(await screen.findByRole('radio', { name: /one model with variants/i }));
+  fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files } });
+
+  const pendingVariants = await screen.findByRole('region', { name: 'baseplate-2x2.stl variants' });
+  expect(within(pendingVariants).getByText('baseplate-2x2.stl')).toBeInTheDocument();
+  expect(within(pendingVariants).getByText('baseplate-3x3.stl')).toBeInTheDocument();
+  expect(within(pendingVariants).queryByRole('button', { name: /remove .* variant/i })).not.toBeInTheDocument();
+
+  await act(async () => {
+    finishUpload(Response.json({
+      ...model,
+      id: 'opengrid-baseplate',
+      title: 'OpenGrid Baseplate',
+      primaryThumb: 'f1.png',
+      totalBytes: files.reduce((total, file) => total + file.size, 0),
+      files: files.map((file, index) => ({
+        ...model.files[0],
+        id: `f${index + 1}`,
+        modelId: 'opengrid-baseplate',
+        filename: file.name,
+        relPath: `files/${file.name}`,
+        sizeBytes: file.size,
+        thumbPath: `thumbs/f${index + 1}.png`,
+      })),
+    }, { status: 201 }));
+  });
+
+  const variants = await screen.findByRole('region', { name: 'OpenGrid Baseplate variants' });
+  expect(within(variants).getByAltText('baseplate-2x2.stl variant preview')).toHaveAttribute('src', '/thumbs/opengrid-baseplate/f1.png');
+  expect(within(variants).getByAltText('baseplate-3x3.stl variant preview')).toHaveAttribute('src', '/thumbs/opengrid-baseplate/f2.png');
+  fireEvent.click(within(variants).getByRole('button', { name: 'Remove baseplate-3x3.stl variant' }));
+  expect(calls).not.toContain('DELETE /api/models/opengrid-baseplate/files/f2');
+  const dialog = await screen.findByRole('alertdialog', { name: 'Delete variant?' });
+  expect(within(dialog).getByText(/baseplate-3x3\.stl/)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete variant' }));
+
+  await waitFor(() => expect(calls).toContain('DELETE /api/models/opengrid-baseplate/files/f2'));
+  await waitFor(() => expect(screen.queryByText('baseplate-3x3.stl')).not.toBeInTheDocument());
+  expect(screen.getByText('baseplate-2x2.stl')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Remove baseplate-2x2.stl variant' })).not.toBeInTheDocument();
 });
 
 test('keeps ZIP bundles separate while grouping loose files', async () => {
@@ -225,19 +330,24 @@ test('keeps ZIP bundles separate while grouping loose files', async () => {
   ]));
 });
 
-test('adds uploaded models to the selected collection', async () => {
+test('adds concurrent uploads to the selected collection in drop order', async () => {
   window.history.pushState({}, '', '/upload');
-  const calls: string[] = [];
+  const assignments: string[] = [];
+  const finish = new Map<string, () => void>();
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url === '/api/collections') return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '' }]);
     if (url === '/api/models' && init?.method === 'POST') {
       const file = (init.body as FormData).get('file') as File;
-      return Response.json({ ...model, id: file.name, title: file.name, primaryThumb: 'card.png' }, { status: 201 });
+      return new Promise<Response>((resolve) => {
+        finish.set(file.name, () => resolve(Response.json({ ...model, id: file.name, title: file.name, primaryThumb: 'card.png' }, { status: 201 })));
+      });
     }
-    if (url.startsWith('/api/collections/c1/models/') && init?.method === 'PUT') return new Response(null, { status: 204 });
+    if (url.startsWith('/api/collections/c1/models/') && init?.method === 'PUT') {
+      assignments.push(url.split('/').at(-1) ?? '');
+      return new Response(null, { status: 204 });
+    }
     return Response.json({});
   }));
   renderApp();
@@ -249,8 +359,11 @@ test('adds uploaded models to the selected collection', async () => {
   await chooseSeparateModels();
   fireEvent.drop(screen.getByRole('button', { name: /drop 3d files/i }), { dataTransfer: { files: [new File(['a'], 'cube.stl'), new File(['b'], 'bracket.stl')] } });
 
-  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/cube.stl'));
-  await waitFor(() => expect(calls).toContain('PUT /api/collections/c1/models/bracket.stl'));
+  await waitFor(() => expect(finish.size).toBe(2));
+  await act(async () => { finish.get('bracket.stl')?.(); });
+  expect(assignments).toEqual([]);
+  await act(async () => { finish.get('cube.stl')?.(); });
+  await waitFor(() => expect(assignments).toEqual(['cube.stl', 'bracket.stl']));
 });
 
 test('refreshes collections after removing an assigned upload', async () => {
@@ -318,33 +431,6 @@ test('cleans up a model cancelled while collection assignment is in flight', asy
   await waitFor(() => expect(calls.filter((call) => call === 'GET /api/collections')).toHaveLength(2));
   expect(calls.lastIndexOf('GET /api/collections')).toBeGreaterThan(calls.indexOf('DELETE /api/models/cube.stl'));
   expect(screen.queryByText('cube.stl')).not.toBeInTheDocument();
-});
-
-test('serializes automatic uploads to avoid concurrent database writes', async () => {
-  window.history.pushState({}, '', '/upload');
-  const uploads: string[] = [];
-  let releaseFirst: (response: Response) => void = () => undefined;
-  const firstResponse = new Promise<Response>((resolve) => { releaseFirst = resolve; });
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
-    if (url === '/api/models' && init?.method === 'POST') {
-      const file = (init.body as FormData).get('file') as File;
-      uploads.push(file.name);
-      if (uploads.length === 1) return firstResponse;
-      return Response.json({ ...model, id: file.name, title: file.name }, { status: 201 });
-    }
-    return Response.json({});
-  }));
-  renderApp();
-
-  await chooseSeparateModels();
-  const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
-  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.stl'), new File(['b'], 'second.stl')] } });
-
-  await waitFor(() => expect(uploads).toEqual(['first.stl']));
-  releaseFirst(Response.json({ ...model, id: 'first.stl', title: 'first.stl' }, { status: 201 }));
-  await waitFor(() => expect(uploads).toEqual(['first.stl', 'second.stl']));
 });
 
 test('reconciles a thumbnail event that arrives before the upload response', async () => {
@@ -417,8 +503,7 @@ test('keeps a cancelled upload visible when server cleanup fails', async () => {
 
 test('cleans up active uploads and skips queued uploads after unmount', async () => {
   window.history.pushState({}, '', '/upload');
-  let releaseUpload: (response: Response) => void = () => undefined;
-  const uploadResponse = new Promise<Response>((resolve) => { releaseUpload = resolve; });
+  const finish = new Map<string, () => void>();
   const uploads: string[] = [];
   const deleted: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -427,9 +512,9 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
     if (url === '/api/models' && init?.method === 'POST') {
       const file = (init.body as FormData).get('file') as File;
       uploads.push(file.name);
-      return uploads.length === 1
-        ? uploadResponse
-        : Response.json({ ...model, id: file.name, title: file.name }, { status: 201 });
+      return new Promise<Response>((resolve) => {
+        finish.set(file.name, () => resolve(Response.json({ ...model, id: file.name, title: file.name }, { status: 201 })));
+      });
     }
     if (url.startsWith('/api/models/') && init?.method === 'DELETE') {
       deleted.push(url);
@@ -441,13 +526,20 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
 
   await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
-  fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'active.stl'), new File(['b'], 'queued.stl')] } });
-  await waitFor(() => expect(uploads).toEqual(['active.stl']));
+  const files = ['active-a.stl', 'active-b.stl', 'active-c.stl', 'queued.stl'].map((name) => new File([name], name));
+  fireEvent.drop(dropzone, { dataTransfer: { files } });
+  await waitFor(() => expect(uploads).toEqual(['active-a.stl', 'active-b.stl', 'active-c.stl']));
   view.unmount();
-  releaseUpload(Response.json({ ...model, id: 'active.stl', title: 'active.stl' }, { status: 201 }));
+  finish.get('active-a.stl')?.();
+  finish.get('active-b.stl')?.();
+  finish.get('active-c.stl')?.();
 
-  await waitFor(() => expect(deleted).toEqual(['/api/models/active.stl']));
-  expect(uploads).toEqual(['active.stl']);
+  await waitFor(() => expect(deleted.sort()).toEqual([
+    '/api/models/active-a.stl',
+    '/api/models/active-b.stl',
+    '/api/models/active-c.stl',
+  ]));
+  expect(uploads).toEqual(['active-a.stl', 'active-b.stl', 'active-c.stl']);
 });
 
 test('catalog exposes filters, sorting, pagination, and owner nav', async () => {
