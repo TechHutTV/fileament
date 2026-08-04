@@ -5,6 +5,7 @@ web/node_modules/
 web/dist/
 cmd/fileament/dist/
 coverage/
+__pycache__/
 tmp/
 *.db
 *.db-shm
