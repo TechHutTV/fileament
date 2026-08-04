@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 const (
 	thumbnailRenderVersionKey = "thumbnail_render_version"
 	thumbnailRenderVersion    = "3"
+	primaryThumbSourceName    = ".primary-thumb-source"
 )
 
 type ThumbnailEvent struct {
@@ -177,8 +179,19 @@ func (a *App) processNextThumbnail() (err error) {
 	if err := render.RenderPNG(tris, thumbPath, 512); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID); err != nil {
+	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
+	if err != nil {
 		return err
+	}
+	updated, err := updateRes.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		_ = os.Remove(thumbPath)
+		_, _ = a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+		claimed = false
+		return nil
 	}
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
@@ -195,6 +208,9 @@ func (a *App) processNextThumbnail() (err error) {
 	if (fileID == largestFileID && primary == "") || migratesLegacyPrimary {
 		cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.png")
 		if err := copyFile(cardPath, thumbPath); err != nil {
+			return err
+		}
+		if err := writePrimaryThumbSource(filepath.Join(a.cfg.DataDir, "models", modelID), fileID); err != nil {
 			return err
 		}
 		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {
@@ -227,6 +243,23 @@ func filesHaveEqualContents(left, right string) bool {
 	}
 	rightData, err := os.ReadFile(right)
 	return err == nil && bytes.Equal(leftData, rightData)
+}
+
+func readPrimaryThumbSource(modelRoot string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(modelRoot, "thumbs", primaryThumbSourceName))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func writePrimaryThumbSource(modelRoot, fileID string) error {
+	path := filepath.Join(modelRoot, "thumbs", primaryThumbSourceName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(fileID+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func copyFile(dst, src string) error {

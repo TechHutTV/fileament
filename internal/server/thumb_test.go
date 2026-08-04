@@ -88,6 +88,73 @@ func TestSetThumbnailPreservesGeneratedPNGFormat(t *testing.T) {
 	}
 }
 
+func TestDeletingSelectedVariantClearsPrimaryThumbnail(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	model := uploadSTLModel(t, app, cookie, "base.stl", "Variants")
+	body, contentType := multipartFile(t, "selected.stl", []byte(validSTL()))
+	req := httptest.NewRequest(http.MethodPost, "/api/models/"+model.ID+"/files", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add variant status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &model); err != nil {
+		t.Fatal(err)
+	}
+	for range model.Files {
+		if err := app.processNextThumbnail(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected := model.Files[1]
+	req = jsonReq(http.MethodPut, "/api/models/"+model.ID+"/thumb", `{"fileId":"`+selected.ID+`"}`)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set thumbnail status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	selectedThumb := filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", selected.ID+".png")
+	if err := os.WriteFile(selectedThumb, []byte("regenerated thumbnail"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/models/"+model.ID+"/files/"+selected.ID, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete selected variant status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated Model
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.PrimaryThumb != "" || len(updated.Files) != 1 || updated.Files[0].ID == selected.ID {
+		t.Fatalf("unexpected model after deleting selected variant: %#v", updated)
+	}
+	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", "card.png")); !os.IsNotExist(err) {
+		t.Fatalf("stale card thumbnail remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", model.ID, "thumbs", primaryThumbSourceName)); !os.IsNotExist(err) {
+		t.Fatalf("stale primary thumbnail source remains: %v", err)
+	}
+	sidecarData, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "model.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sidecar Model
+	if err := json.Unmarshal(sidecarData, &sidecar); err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.PrimaryThumb != "" || len(sidecar.Files) != 1 {
+		t.Fatalf("stale sidecar after deleting selected variant: %#v", sidecar)
+	}
+}
+
 func TestSetThumbnailRejectsStoredPathOutsideThumbnailDirectory(t *testing.T) {
 	app := newAuthedTestApp(t)
 	cookie := loginCookie(t, app, "password-password")

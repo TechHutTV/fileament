@@ -248,7 +248,14 @@ test('previews and removes an individual variant from a grouped upload', async (
     if (url === '/api/models/grouped' && init?.method === 'POST') {
       return upload;
     }
-    if (url === '/api/models/opengrid-baseplate/files/f2' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    if (url === '/api/models/opengrid-baseplate/files/f2' && init?.method === 'DELETE') return Response.json({
+      ...model,
+      id: 'opengrid-baseplate',
+      title: 'OpenGrid Baseplate',
+      primaryThumb: '',
+      totalBytes: files[0].size,
+      files: [{ ...model.files[0], id: 'f1', modelId: 'opengrid-baseplate', filename: files[0].name, sizeBytes: files[0].size, thumbPath: 'thumbs/f1.png' }],
+    });
     return Response.json({});
   }));
   renderApp();
@@ -292,6 +299,7 @@ test('previews and removes an individual variant from a grouped upload', async (
   await waitFor(() => expect(calls).toContain('DELETE /api/models/opengrid-baseplate/files/f2'));
   await waitFor(() => expect(screen.queryByText('baseplate-3x3.stl')).not.toBeInTheDocument());
   expect(screen.getByText('baseplate-2x2.stl')).toBeInTheDocument();
+  expect(screen.getByAltText('OpenGrid Baseplate thumbnail')).toHaveAttribute('src', '/thumbs/opengrid-baseplate/f1.png');
   expect(screen.queryByRole('button', { name: 'Remove baseplate-2x2.stl variant' })).not.toBeInTheDocument();
 });
 

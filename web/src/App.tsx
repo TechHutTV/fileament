@@ -493,18 +493,10 @@ function UploadPage() {
     setRemovingVariantID(file.id);
     setVariantRemoveError('');
     try {
-      await api(`/api/models/${item.model.id}/files/${file.id}`, { method: 'DELETE' });
+      const model = await api(`/api/models/${item.model.id}/files/${file.id}`, { method: 'DELETE' }) as Model;
       setItems((current) => current.map((candidate) => {
         if (candidate.key !== item.key || !candidate.model) return candidate;
-        const files = candidate.model.files.filter((variant) => variant.id !== file.id);
-        const deletedThumb = fileThumbName(file);
-        const model = {
-          ...candidate.model,
-          files,
-          totalBytes: Math.max(candidate.model.totalBytes - file.sizeBytes, 0),
-          primaryThumb: candidate.model.primaryThumb === deletedThumb ? undefined : candidate.model.primaryThumb,
-        };
-        return { ...candidate, model, status: files.some((variant) => fileThumbName(variant)) ? 'ready' : 'processing' };
+        return { ...candidate, model, status: model.primaryThumb || model.files.some((variant) => fileThumbName(variant)) ? 'ready' : 'processing' };
       }));
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });

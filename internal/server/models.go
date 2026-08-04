@@ -597,11 +597,28 @@ func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	a.thumbMu.Lock()
+	defer a.thumbMu.Unlock()
+	root := filepath.Join(a.cfg.DataDir, "models", modelID)
 	var rel, thumb sql.NullString
+	var primary string
 	var size int64
-	if err := a.db.QueryRow(`SELECT rel_path,size_bytes,thumb_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&rel, &size, &thumb); err != nil {
+	if err := a.db.QueryRow(`SELECT f.rel_path,f.size_bytes,f.thumb_path,COALESCE(m.primary_thumb,'') FROM files f JOIN models m ON m.id = f.model_id WHERE f.id = ? AND f.model_id = ?`, fileID, modelID).Scan(&rel, &size, &thumb, &primary); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
+	}
+	primaryPath := ""
+	primarySource, sourceErr := readPrimaryThumbSource(root)
+	clearPrimary := sourceErr == nil && primarySource == fileID
+	if sourceErr != nil && thumb.Valid && thumb.String != "" && primary != "" && primary == filepath.Base(primary) {
+		thumbPath, thumbErr := containedPath(root, thumb.String)
+		cardPath, cardErr := containedName(filepath.Join(root, "thumbs"), primary)
+		if thumbErr == nil && cardErr == nil && filesHaveEqualContents(thumbPath, cardPath) {
+			clearPrimary = true
+		}
+	}
+	if clearPrimary && primary != "" && primary == filepath.Base(primary) {
+		primaryPath, _ = containedName(filepath.Join(root, "thumbs"), primary)
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -617,7 +634,7 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), primary_thumb = CASE WHEN primary_thumb = ? THEN '' ELSE primary_thumb END, updated_at = ? WHERE id = ?`, size, filepath.Base(thumb.String), time.Now().Unix(), modelID); err != nil {
+	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), primary_thumb = CASE WHEN ? THEN '' ELSE primary_thumb END, updated_at = ? WHERE id = ?`, size, clearPrimary, time.Now().Unix(), modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -625,7 +642,6 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	root := filepath.Join(a.cfg.DataDir, "models", modelID)
 	if rel.Valid {
 		if path, err := containedPath(root, rel.String); err == nil {
 			_ = os.Remove(path)
@@ -636,6 +652,12 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 			_ = os.Remove(path)
 		}
 	}
+	if primaryPath != "" {
+		_ = os.Remove(primaryPath)
+	}
+	if clearPrimary {
+		_ = os.Remove(filepath.Join(root, "thumbs", primaryThumbSourceName))
+	}
 	m, err := a.getModel(modelID)
 	if err == nil {
 		err = a.writeSidecar(m)
@@ -644,7 +666,7 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +812,10 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 	}
 	cardName := "card" + ext
 	if err := copyFile(filepath.Join(thumbDir, cardName), sourcePath); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := writePrimaryThumbSource(filepath.Join(a.cfg.DataDir, "models", id), req.FileID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
