@@ -688,11 +688,14 @@ test('reports a share-links query failure instead of an empty state', async () =
   expect(screen.queryByText('No share links yet')).not.toBeInTheDocument();
 });
 
-test('shows the revoke action only for active share links', async () => {
+test('shows complete share metadata, copies the absolute URL, and only revokes active links', async () => {
   window.history.pushState({}, '', '/settings');
+  const now = Math.floor(Date.now() / 1000);
   const calls: string[] = [];
   let finishRevoke: () => void = () => undefined;
   const revokeResponse = new Promise<Response>((resolve) => { finishRevoke = () => resolve(new Response(null, { status: 204 })); });
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', Object.assign(Object.create(window.navigator), { clipboard: { writeText } }));
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push(`${init?.method ?? 'GET'} ${url}`);
@@ -700,16 +703,36 @@ test('shows the revoke action only for active share links', async () => {
     if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
     if (url === '/api/shares/active' && init?.method === 'DELETE') return revokeResponse;
     if (url.includes('/api/shares')) return Response.json([
-      { id: 'active', token: 'active-token', scope: 'model', targetId: 'm1', label: 'Active link' },
-      { id: 'revoked', token: 'revoked-token', scope: 'model', targetId: 'm1', label: 'Revoked link', revokedAt: 1 },
+      { id: 'active', token: 'active-token', url: 'https://models.example/s/active-token', scope: 'model', targetId: 'm1', targetName: 'Calibration Cube', label: 'Active link', createdAt: now - 3600, expiresAt: now + 86400, hitCount: 2 },
+      { id: 'permanent', token: 'permanent-token', url: 'https://models.example/s/permanent-token', scope: 'collection', targetId: 'c1', targetName: 'Fixtures', label: 'Permanent link', createdAt: now - 7200, hitCount: 0 },
+      { id: 'expired', token: 'expired-token', url: 'https://models.example/s/expired-token', scope: 'model', targetId: 'm1', targetName: 'Calibration Cube', label: 'Expired link', createdAt: now - 10800, expiresAt: now - 1, hitCount: 1 },
+      { id: 'revoked', token: 'revoked-token', url: 'https://models.example/s/revoked-token', scope: 'model', targetId: 'm1', targetName: 'Calibration Cube', label: 'Revoked link', createdAt: now - 14400, revokedAt: now - 60, hitCount: 4 },
     ]);
     return Response.json({});
   }));
   renderApp();
 
-  expect(await screen.findByText('Revoked')).toBeInTheDocument();
-  const revoke = screen.getByRole('button', { name: 'Revoke Active link share' });
-  fireEvent.click(revoke);
+  expect(await screen.findAllByText('Calibration Cube')).toHaveLength(3);
+  expect(screen.getByText('Fixtures')).toBeInTheDocument();
+  expect(screen.getByText('2 views')).toBeInTheDocument();
+  expect(screen.getByText('1 view')).toBeInTheDocument();
+  expect(screen.getAllByText('No expiration')).toHaveLength(2);
+  expect(screen.getAllByText(/Created /)).toHaveLength(4);
+  expect(screen.getAllByText('Active', { selector: '.share-status' })).toHaveLength(2);
+  expect(screen.getByText('Expired', { selector: '.share-status' })).toBeInTheDocument();
+  expect(screen.getByText('Revoked', { selector: '.share-status' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /Active link/ })).toHaveAttribute('href', 'https://models.example/s/active-token');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy Active link share URL' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://models.example/s/active-token'));
+  expect(await screen.findByText('Copied')).toBeInTheDocument();
+
+  expect(screen.getByRole('button', { name: 'Revoke Active link share' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Revoke Permanent link share' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Revoke Expired link share' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Revoke Revoked link share' })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Revoke Active link share' }));
   const dialog = await screen.findByRole('alertdialog', { name: 'Revoke share link?' });
   expect(within(dialog).getByText(/Active link/)).toBeInTheDocument();
   expect(calls).not.toContain('DELETE /api/shares/active');
@@ -721,7 +744,30 @@ test('shows the revoke action only for active share links', async () => {
   finishRevoke();
   await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: 'Revoke Active link share' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Revoke Revoked link share' })).not.toBeInTheDocument();
+});
+
+test('creates a share with no expiration when selected', async () => {
+  window.history.pushState({}, '', '/models/m1');
+  const requests: Array<{ method: string; body?: string }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({ method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined });
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/models/m1')) return Response.json(model);
+    if (url.includes('/api/collections') || url.includes('/api/shares')) return Response.json([]);
+    return Response.json({});
+  }));
+  renderApp();
+
+  expect(await screen.findByDisplayValue('Calibration Cube')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'No expiration' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Create share' }));
+
+  await waitFor(() => {
+    const request = requests.find((entry) => entry.method === 'POST' && entry.body?.includes('"scope":"model"'));
+    expect(request).toBeDefined();
+    expect(JSON.parse(request?.body ?? '{}')).toMatchObject({ expiresAt: 0 });
+  });
 });
 
 test('detail management actions call owner APIs and preserve viewer gate', async () => {
@@ -952,8 +998,19 @@ test('collection detail supports metadata, cover, ordering, and confirmed remova
 
 test('public collection cards select models within the same share and use token asset URLs', async () => {
   window.history.pushState({}, '', '/s/sharetoken?model=m1');
+  let publicRequests = 0;
+  let statusRequests = 0;
+  let statusCode = 204;
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-    if (String(input).includes('/api/public/sharetoken')) return Response.json({ collection: { id: 'c1', name: 'Shared', slug: 'shared', description: '', models: [{ ...model, primaryThumb: 'card.jpg' }] } });
+    const url = String(input);
+    if (url === '/api/public/sharetoken/status') {
+      statusRequests += 1;
+      return new Response(null, { status: statusCode });
+    }
+    if (url === '/api/public/sharetoken') {
+      publicRequests += 1;
+      return Response.json({ share: { expiresAt: Math.floor(Date.now() / 1000) + 3600 }, collection: { id: 'c1', name: 'Shared', slug: 'shared', description: '', models: [{ ...model, primaryThumb: 'card.jpg' }] } });
+    }
     return Response.json({});
   }));
   renderApp();
@@ -961,6 +1018,29 @@ test('public collection cards select models within the same share and use token 
   expect(screen.getByRole('link', { name: 'Calibration Cube' })).toHaveAttribute('href', '/s/sharetoken?model=m1');
   expect(screen.getByRole('button', { name: /load 3d view/i })).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /cube.stl/i })).toHaveAttribute('href', '/api/public/sharetoken/files/f1');
+  await act(async () => {
+    window.dispatchEvent(new Event('offline'));
+    window.dispatchEvent(new Event('online'));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  });
+  expect(publicRequests).toBe(1);
+  expect(statusRequests).toBeGreaterThan(0);
+
+  statusCode = 500;
+  await act(async () => {
+    window.dispatchEvent(new Event('focus'));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  });
+  expect(screen.getByText('Shared')).toBeInTheDocument();
+
+  statusCode = 410;
+  await act(async () => {
+    window.dispatchEvent(new Event('focus'));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  });
+  expect(await screen.findByText('Share not available')).toBeInTheDocument();
+  expect(screen.queryByText('Shared')).not.toBeInTheDocument();
+  expect(publicRequests).toBe(1);
 });
 
 function renderApp() {

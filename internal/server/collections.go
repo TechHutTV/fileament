@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,15 +34,17 @@ type collectionSummary struct {
 }
 
 type ShareLink struct {
-	ID        string `json:"id"`
-	Token     string `json:"token"`
-	Scope     string `json:"scope"`
-	TargetID  string `json:"targetId"`
-	Label     string `json:"label,omitempty"`
-	ExpiresAt int64  `json:"expiresAt,omitempty"`
-	RevokedAt int64  `json:"revokedAt,omitempty"`
-	HitCount  int64  `json:"hitCount"`
-	CreatedAt int64  `json:"createdAt"`
+	ID         string `json:"id"`
+	Token      string `json:"token"`
+	Scope      string `json:"scope"`
+	TargetID   string `json:"targetId"`
+	TargetName string `json:"targetName,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Label      string `json:"label,omitempty"`
+	ExpiresAt  int64  `json:"expiresAt,omitempty"`
+	RevokedAt  int64  `json:"revokedAt,omitempty"`
+	HitCount   int64  `json:"hitCount"`
+	CreatedAt  int64  `json:"createdAt"`
 }
 
 func (a *App) mountCollectionRoutes(r chi.Router) {
@@ -60,6 +63,7 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 		r.Delete("/api/shares/{id}", a.handleRevokeShare)
 	})
 	r.Get("/api/public/{token}", a.handlePublic)
+	r.Get("/api/public/{token}/status", a.handlePublicStatus)
 	r.Get("/api/public/{token}/files/{fid}", a.handlePublicFile)
 	r.Get("/api/public/{token}/mesh/{fid}", a.handlePublicMesh)
 	r.Get("/api/public/{token}/thumbs/{name}", a.handlePublicThumb)
@@ -382,7 +386,14 @@ func (a *App) writeCollectionsSidecar() error {
 }
 
 func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,token,scope,target_id,COALESCE(label,''),COALESCE(expires_at,0),COALESCE(revoked_at,0),hit_count,created_at FROM share_links ORDER BY created_at DESC`)
+	rows, err := a.db.Query(`
+		SELECT s.id,s.token,s.scope,s.target_id,
+			COALESCE(CASE s.scope WHEN 'model' THEN m.title WHEN 'collection' THEN c.name END, s.target_id),
+			COALESCE(s.label,''),COALESCE(s.expires_at,0),COALESCE(s.revoked_at,0),s.hit_count,s.created_at
+		FROM share_links s
+		LEFT JOIN models m ON s.scope = 'model' AND m.id = s.target_id
+		LEFT JOIN collections c ON s.scope = 'collection' AND c.id = s.target_id
+		ORDER BY s.created_at DESC`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -391,10 +402,11 @@ func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
 	var out []ShareLink
 	for rows.Next() {
 		var s ShareLink
-		if err := rows.Scan(&s.ID, &s.Token, &s.Scope, &s.TargetID, &s.Label, &s.ExpiresAt, &s.RevokedAt, &s.HitCount, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Token, &s.Scope, &s.TargetID, &s.TargetName, &s.Label, &s.ExpiresAt, &s.RevokedAt, &s.HitCount, &s.CreatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		s.URL = a.shareURL(r, s.Token)
 		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {
@@ -422,25 +434,33 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("expiresAt must be in the future"))
 		return
 	}
+	var targetName string
 	if req.Scope == "model" {
-		if _, err := a.getModel(req.TargetID); err != nil {
+		model, err := a.getModel(req.TargetID)
+		if err != nil {
 			writeError(w, http.StatusNotFound, errors.New("model not found"))
 			return
 		}
-	} else if _, err := a.getCollection(req.TargetID); err != nil {
-		writeError(w, http.StatusNotFound, errors.New("collection not found"))
-		return
+		targetName = model.Title
+	} else {
+		collection, err := a.getCollection(req.TargetID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, errors.New("collection not found"))
+			return
+		}
+		targetName = collection.Name
 	}
 	token, err := randomBase62(22)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s := ShareLink{ID: ids.New(), Token: token, Scope: req.Scope, TargetID: req.TargetID, Label: req.Label, ExpiresAt: req.ExpiresAt, CreatedAt: time.Now().Unix()}
+	s := ShareLink{ID: ids.New(), Token: token, Scope: req.Scope, TargetID: req.TargetID, TargetName: targetName, Label: req.Label, ExpiresAt: req.ExpiresAt, CreatedAt: time.Now().Unix()}
 	if _, err := a.db.Exec(`INSERT INTO share_links(id,token,scope,target_id,label,expires_at,created_at) VALUES(?,?,?,?,?,NULLIF(?,0),?)`, s.ID, s.Token, s.Scope, s.TargetID, s.Label, s.ExpiresAt, s.CreatedAt); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.URL = a.shareURL(r, s.Token)
 	writeJSON(w, http.StatusCreated, s)
 }
 
@@ -470,6 +490,7 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		a.recordShareView(&share)
 		writeJSON(w, http.StatusOK, map[string]any{"share": share, "model": m})
 		return
 	}
@@ -478,7 +499,17 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.recordShareView(&share)
 	writeJSON(w, http.StatusOK, map[string]any{"share": share, "collection": c})
+}
+
+func (a *App) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Robots-Tag", "noindex")
+	if _, err := a.resolveShare(chi.URLParam(r, "token")); err != nil {
+		publicError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handlePublicFile(w http.ResponseWriter, r *http.Request) {
@@ -588,8 +619,28 @@ func (a *App) resolveShare(token string) (ShareLink, error) {
 	if s.RevokedAt > 0 || (s.ExpiresAt > 0 && s.ExpiresAt <= now) {
 		return s, errShareGone
 	}
-	_, _ = a.db.Exec(`UPDATE share_links SET hit_count = hit_count + 1 WHERE id = ?`, s.ID)
 	return s, nil
+}
+
+func (a *App) recordShareView(share *ShareLink) {
+	if _, err := a.db.Exec(`UPDATE share_links SET hit_count = hit_count + 1 WHERE id = ?`, share.ID); err == nil {
+		share.HitCount++
+	}
+}
+
+func (a *App) shareURL(r *http.Request, token string) string {
+	var base string
+	if configured, err := url.Parse(strings.TrimSpace(a.cfg.BaseURL)); err == nil && configured.Host != "" && (strings.EqualFold(configured.Scheme, "http") || strings.EqualFold(configured.Scheme, "https")) {
+		base = strings.ToLower(configured.Scheme) + "://" + configured.Host
+	}
+	if base == "" {
+		scheme := "http"
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			scheme = "https"
+		}
+		base = scheme + "://" + r.Host
+	}
+	return base + "/s/" + token
 }
 
 func (a *App) publicFileAllowed(s ShareLink, fileID string) (string, bool) {

@@ -1372,8 +1372,127 @@ label textarea {
   justify-content: center;
 }
 
+.share-form > label:first-child {
+  flex: 1 1 220px;
+}
+
+.share-form > label:nth-child(2) {
+  flex: 0 1 110px;
+}
+
+.share-form .share-no-expiration {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 7px;
+  min-height: 39px;
+  white-space: nowrap;
+}
+
+.share-form .share-no-expiration input {
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
+.share-row {
+  align-items: center;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  display: grid;
+  gap: 8px 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px 0;
+}
+
 .share-row:first-of-type {
   border-top: 0;
+}
+
+.share-link {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  text-decoration: none;
+}
+
+.share-link > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.share-link strong,
+.share-link small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-link small,
+.share-metadata small {
+  color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.share-metadata {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  grid-column: 1 / -1;
+}
+
+.share-status {
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  text-transform: uppercase;
+}
+
+.share-status.active {
+  background: color-mix(in srgb, #1e6b58 12%, transparent);
+  border-color: color-mix(in srgb, #1e6b58 28%, transparent);
+  color: #1e6b58;
+}
+
+:root[data-theme="dark"] .share-status.active {
+  color: #72cdb5;
+}
+
+.share-status.expired {
+  background: color-mix(in srgb, #b7791f 12%, transparent);
+  border-color: color-mix(in srgb, #b7791f 28%, transparent);
+  color: #8c5a15;
+}
+
+:root[data-theme="dark"] .share-status.expired {
+  color: #e5b86b;
+}
+
+.share-status.revoked {
+  background: color-mix(in srgb, #a95353 10%, transparent);
+  border-color: color-mix(in srgb, #a95353 24%, transparent);
+  color: #9f2f2f;
+}
+
+:root[data-theme="dark"] .share-status.revoked {
+  color: #ef7777;
+}
+
+.share-actions {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  grid-column: 2;
+  grid-row: 1;
+  justify-content: flex-end;
+}
+
+.share-actions small {
+  font-size: 12px;
 }
 
 .compact-upload {
@@ -1957,6 +2076,16 @@ label textarea {
 
   .surface-card {
     padding: 18px;
+  }
+
+  .share-form > label,
+  .share-form > button {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .share-form > button {
+    justify-content: center;
   }
 
   .model-color-setting {

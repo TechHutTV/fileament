@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box, Check, ChevronDown, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
+import { Box, Check, ChevronDown, Copy, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
@@ -48,7 +48,7 @@ export type Model = {
 type Page = { items: Model[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: Model[] };
-type Share = { id: string; token: string; scope: 'model' | 'collection'; targetId: string; label?: string; expiresAt?: number; revokedAt?: number };
+type Share = { id: string; token: string; url?: string; scope: 'model' | 'collection'; targetId: string; targetName?: string; label?: string; expiresAt?: number; revokedAt?: number; hitCount: number; createdAt: number };
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
 type ConfirmationRequest = { title: string; description: string; confirmLabel: string; onConfirm: () => void };
@@ -608,11 +608,11 @@ function SettingsPage() {
       <form className="stack settings-form" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><small className="field-help">Use at least 12 characters.</small><button type="submit" disabled={change.isPending}>{change.isPending ? 'Updating password' : 'Change password'}</button>{change.isError && <p className="error">Password change failed</p>}{change.isSuccess && <p className="success">Password updated.</p>}</form>
     </section>
     <section className="surface-card settings-card">
-      <SectionHeading icon={<Link2 size={19} />} title="Share links" description="Review and revoke public links created for models and collections." />
+      <SectionHeading icon={<Link2 size={19} />} title="Share links" description="Review, copy, and revoke public links created for models and collections." />
       {sharesError && <Empty text="Share links could not be loaded" />}
       {sharesLoading && <Empty text="Loading share links" />}
       {!sharesLoading && !sharesError && (shares?.length ?? 0) === 0 && <EmptyState icon={<Link2 size={24} />} title="No share links yet" text="Links you create from a model or collection will appear here." compact />}
-      {shares?.map((s) => <div className="file share-row" key={s.id}><a href={`/s/${s.token}`}><Link2 size={16} />{s.label || s.scope}</a><small>{s.revokedAt ? 'Revoked' : s.expiresAt ? new Date(s.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small>{!s.revokedAt && <button type="button" className="icon danger" aria-label={`Revoke ${s.label || s.scope} share`} onClick={() => { revoke.reset(); setShareToRevoke(s); }}><Trash2 size={16} /></button>}</div>)}
+      {shares?.map((s) => <ShareRow key={s.id} share={s} onRevoke={() => { revoke.reset(); setShareToRevoke(s); }} />)}
     </section>
     <ConfirmationDialog request={shareToRevoke ? { title: 'Revoke share link?', description: `Revoke “${shareToRevoke.label || shareToRevoke.scope}”? Anyone with this link will immediately lose access.`, confirmLabel: 'Revoke link', onConfirm: () => revoke.mutate(shareToRevoke.id) } : null} busy={revoke.isPending} error={revoke.isError ? 'This share link could not be revoked. Try again.' : undefined} onCancel={() => setShareToRevoke(null)} />
   </section>;
@@ -673,8 +673,55 @@ function CollectionDetail({ slug }: { slug: string }) {
 
 function PublicPage({ token }: { token: string }) {
   const selected = new URLSearchParams(window.location.search).get('model');
-  const { data, isError } = useQuery<{ model?: Model; collection?: Collection }>({ queryKey: ['public', token], queryFn: () => api(`/api/public/${token}`) });
-  if (isError) return <Shell><Empty text="Share not available" /></Shell>;
+  const [unavailable, setUnavailable] = useState(false);
+  const { data, isError } = useQuery<{ share?: Share; model?: Model; collection?: Collection }>({
+    queryKey: ['public', token],
+    queryFn: () => api(`/api/public/${token}`),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  useEffect(() => {
+    let active = true;
+    setUnavailable(false);
+    const validate = async () => {
+      try {
+        const response = await fetch(`/api/public/${token}/status`, { credentials: 'include' });
+        if (active && (response.status === 404 || response.status === 410)) setUnavailable(true);
+      } catch {
+        // Keep the current page during transient network failures; reconnect rechecks it.
+      }
+    };
+    const validateVisible = () => { if (document.visibilityState === 'visible') void validate(); };
+    void validate();
+    const interval = window.setInterval(() => { void validate(); }, 60_000);
+    window.addEventListener('focus', validate);
+    window.addEventListener('online', validate);
+    document.addEventListener('visibilitychange', validateVisible);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', validate);
+      window.removeEventListener('online', validate);
+      document.removeEventListener('visibilitychange', validateVisible);
+    };
+  }, [token]);
+  useEffect(() => {
+    const expiresAt = data?.share?.expiresAt;
+    if (!expiresAt) return undefined;
+    let timeout = 0;
+    const expire = () => {
+      const remaining = expiresAt * 1000 - Date.now();
+      if (remaining <= 0) {
+        setUnavailable(true);
+        return;
+      }
+      timeout = window.setTimeout(expire, Math.min(remaining, 2_147_483_647));
+    };
+    expire();
+    return () => window.clearTimeout(timeout);
+  }, [data?.share?.expiresAt]);
+  if (isError || unavailable) return <Shell><Empty text="Share not available" /></Shell>;
   const model = data?.model ?? data?.collection?.models?.find((m) => m.id === selected) ?? data?.collection?.models?.[0];
   return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
 }
@@ -705,11 +752,56 @@ function CollectionForm({ collection, onSave }: { collection?: Collection; onSav
 function ShareForm({ onCreate }: { onCreate: (body: { label: string; expiresAt: number }) => void }) {
   const [label, setLabel] = useState('');
   const [days, setDays] = useState('30');
-  return <form className="inline-form" onSubmit={(e) => { e.preventDefault(); onCreate({ label, expiresAt: Math.floor(Date.now() / 1000) + Number(days || 30) * 86400 }); }}><label>Label<input value={label} onChange={(e) => setLabel(e.target.value)} /></label><label>Days<input type="number" min="1" value={days} onChange={(e) => setDays(e.target.value)} /></label><button type="submit"><Link2 size={16} />Create share</button></form>;
+  const [noExpiration, setNoExpiration] = useState(false);
+  return <form className="inline-form share-form" onSubmit={(e) => { e.preventDefault(); onCreate({ label, expiresAt: noExpiration ? 0 : Math.floor(Date.now() / 1000) + Number(days || 30) * 86400 }); }}><label>Label<input value={label} onChange={(e) => setLabel(e.target.value)} /></label><label>Days<input type="number" min="1" disabled={noExpiration} value={days} onChange={(e) => setDays(e.target.value)} /></label><label className="share-no-expiration"><input type="checkbox" checked={noExpiration} onChange={(e) => setNoExpiration(e.target.checked)} />No expiration</label><button type="submit"><Link2 size={16} />Create share</button></form>;
 }
 
-function ShareRow({ share }: { share: Share }) {
-  return <div className="file"><a href={`/s/${share.token}`}><Link2 size={16} />/s/{share.token}</a><small>{share.expiresAt ? new Date(share.expiresAt * 1000).toLocaleDateString() : 'No expiry'}</small></div>;
+function ShareRow({ share, onRevoke }: { share: Share; onRevoke?: (id: string) => void }) {
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle');
+  const now = Math.floor(Date.now() / 1000);
+  const status = share.revokedAt ? 'revoked' : share.expiresAt && share.expiresAt <= now ? 'expired' : 'active';
+  const label = share.label || `${share.scope} share`;
+  const url = share.url || new URL(`/s/${share.token}`, window.location.origin).toString();
+  const copy = async () => {
+    try {
+      await copyText(url);
+      setCopyStatus('copied');
+    } catch {
+      setCopyStatus('error');
+    }
+  };
+  return <article className="share-row">
+    <a className="share-link" href={url} target="_blank" rel="noreferrer"><Link2 size={17} /><span><strong>{label}</strong><small>{share.targetName || share.targetId}</small></span></a>
+    <div className="share-metadata">
+      <span className={`share-status ${status}`}>{status[0].toUpperCase() + status.slice(1)}</span>
+      <small>{share.createdAt ? `Created ${new Date(share.createdAt * 1000).toLocaleDateString()}` : 'Created date unavailable'}</small>
+      <small>{share.expiresAt ? `Expires ${new Date(share.expiresAt * 1000).toLocaleDateString()}` : 'No expiration'}</small>
+      <small>{share.hitCount ?? 0} {(share.hitCount ?? 0) === 1 ? 'view' : 'views'}</small>
+    </div>
+    <div className="share-actions">
+      <button type="button" className="icon" aria-label={`Copy ${label} share URL`} title="Copy share URL" onClick={copy}><Copy size={16} /></button>
+      {onRevoke && status === 'active' && <button type="button" className="icon danger" aria-label={`Revoke ${label} share`} title="Revoke share" onClick={() => onRevoke(share.id)}><Trash2 size={16} /></button>}
+      {copyStatus === 'copied' && <small className="success" role="status">Copied</small>}
+      {copyStatus === 'error' && <small className="error" role="alert">Copy failed</small>}
+    </div>
+  </article>;
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.readOnly = true;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('copy failed');
 }
 
 function UploadInline({ label, path, onDone }: { label: string; path: string; onDone: (value: unknown) => void }) {
