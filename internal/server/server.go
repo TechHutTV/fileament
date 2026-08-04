@@ -20,18 +20,20 @@ import (
 )
 
 type App struct {
-	cfg         config.Config
-	db          *sql.DB
-	webFS       fs.FS
-	dataMu      sync.RWMutex
-	restoreMu   sync.Mutex
-	maintenance atomic.Bool
-	stop        chan struct{}
-	workerWG    sync.WaitGroup
-	thumbMu     sync.Mutex
-	eventsMu    sync.Mutex
-	events      map[chan ThumbnailEvent]struct{}
-	eventsReset chan struct{}
+	cfg                 config.Config
+	db                  *sql.DB
+	webFS               fs.FS
+	dataMu              sync.RWMutex
+	modelPersistMu      sync.Mutex
+	collectionPersistMu sync.Mutex
+	restoreMu           sync.Mutex
+	maintenance         atomic.Bool
+	stop                chan struct{}
+	workerWG            sync.WaitGroup
+	thumbMu             sync.Mutex
+	eventsMu            sync.Mutex
+	events              map[chan ThumbnailEvent]struct{}
+	eventsReset         chan struct{}
 }
 
 func New(cfg config.Config, webFS fs.FS) (*App, error) {

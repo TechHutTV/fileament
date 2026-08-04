@@ -88,7 +88,7 @@ func TestAdditionalFilesAndDeletesUpdateSidecarAndJobs(t *testing.T) {
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	app.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("delete file status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	sidecar, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "models", model.ID, "model.json"))
