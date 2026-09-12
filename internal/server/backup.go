@@ -41,6 +41,11 @@ func (a *App) mountBackupRoutes(r chi.Router) {
 
 func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	a.dataMu.Lock()
+	if a.maintenance.Load() {
+		a.dataMu.Unlock()
+		writeError(w, http.StatusServiceUnavailable, errMutationRecoveryRequired)
+		return
+	}
 	if !a.validSession(r) {
 		a.dataMu.Unlock()
 		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
@@ -166,6 +171,7 @@ func addPersistentDataToBackup(zw *zip.Writer, root string) error {
 		"tmp":                  true,
 		"backups":              true,
 		".restore":             true,
+		".mutations":           true,
 	}
 	for _, entry := range entries {
 		if excluded[entry.Name()] {

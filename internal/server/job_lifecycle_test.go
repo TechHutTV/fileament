@@ -135,7 +135,7 @@ func TestDeletedModelCannotPublishAnActiveThumbnail(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete=%d %s", rec.Code, rec.Body.String())
 	}
-	if err := app.publishThumbnail(context.Background(), jobID, fileID, model.ID, model.Files[0].RelPath, prepared); err != nil {
+	if _, err := app.publishThumbnail(context.Background(), jobID, fileID, model.ID, model.Files[0].RelPath, prepared); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "models", model.ID)); !os.IsNotExist(err) {

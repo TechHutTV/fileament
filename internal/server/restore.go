@@ -315,7 +315,7 @@ func validBackupEntryName(name string) bool {
 	}
 	rel := strings.TrimPrefix(clean, "data/")
 	top := strings.SplitN(rel, "/", 2)[0]
-	return top != "tmp" && top != "backups" && top != ".restore" &&
+	return top != "tmp" && top != "backups" && top != ".restore" && top != ".mutations" &&
 		top != "fileament.db-journal" && top != "fileament.db-shm" && top != "fileament.db-wal"
 }
 
@@ -468,13 +468,17 @@ func (a *App) handleApplyRestore(w http.ResponseWriter, r *http.Request) {
 		if a.db == nil {
 			a.recoverDatabaseAfterFailedRestore()
 		}
-		if a.db != nil {
+		if a.db != nil && !a.mutationRecovery.Load() {
 			a.startWorkers()
 			a.maintenance.Store(false)
 		}
 	}()
 	a.dataMu.Lock()
 	defer a.dataMu.Unlock()
+	if a.mutationRecovery.Load() {
+		writeError(w, http.StatusServiceUnavailable, errMutationRecoveryRequired)
+		return
+	}
 	if !a.validSession(r) {
 		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 		return
@@ -629,7 +633,7 @@ func managedTopLevelEntries(root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	excluded := map[string]bool{"tmp": true, "backups": true, ".restore": true}
+	excluded := map[string]bool{"tmp": true, "backups": true, ".restore": true, ".mutations": true}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if excluded[entry.Name()] {

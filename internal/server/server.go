@@ -27,9 +27,12 @@ type App struct {
 	webFS               fs.FS
 	dataMu              sync.RWMutex
 	modelPersistMu      sync.Mutex
+	mutationMu          sync.Mutex
+	mutationFault       func(string) error
 	collectionPersistMu sync.Mutex
 	restoreMu           sync.Mutex
 	maintenance         atomic.Bool
+	mutationRecovery    atomic.Bool
 	stop                chan struct{}
 	workerCancel        context.CancelFunc
 	workerWG            sync.WaitGroup
@@ -125,6 +128,9 @@ func openDatabase(dataDir string) (*sql.DB, error) {
 }
 
 func (a *App) initializeData() error {
+	if err := a.recoverMutations(); err != nil {
+		return err
+	}
 	if err := a.seedOwnerPassword(); err != nil {
 		return err
 	}
@@ -146,7 +152,7 @@ func (a *App) initializeData() error {
 func (a *App) maintenanceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.maintenance.Load() && r.URL.Path != "/healthz" {
-			writeError(w, http.StatusServiceUnavailable, errors.New("Fileament is applying a restore"))
+			writeError(w, http.StatusServiceUnavailable, errors.New("Fileament is recovering stored data"))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -161,6 +167,10 @@ func (a *App) dataAccessMiddleware(next http.Handler) http.Handler {
 		}
 		a.dataMu.RLock()
 		defer a.dataMu.RUnlock()
+		if a.maintenance.Load() {
+			writeError(w, http.StatusServiceUnavailable, errMutationRecoveryRequired)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }

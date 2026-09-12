@@ -155,7 +155,7 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	defer func() {
 		if claimed && err != nil {
 			status := "failed"
-			if errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.Canceled) || errors.Is(err, errMutationRecoveryRequired) {
 				status = "pending"
 			}
 			err = errors.Join(err, a.finishThumbnailJob(jobID, status, err.Error()))
@@ -194,107 +194,124 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err := render.RenderPNGContext(ctx, tris, prepared.Name(), 512); err != nil {
 		return err
 	}
-	if err := a.publishThumbnail(ctx, jobID, fileID, modelID, relPath, prepared.Name()); err != nil {
+	published, err := a.publishThumbnail(ctx, jobID, fileID, modelID, relPath, prepared.Name())
+	if err != nil {
 		return err
 	}
 	claimed = false
+	if published {
+		a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))})
+	}
 	return nil
 }
 
-func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relPath, prepared string) error {
+func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relPath, prepared string) (published bool, err error) {
 	if !validStorageID(fileID) || !validAssetPath(relPath, "files") {
-		return errInvalidPath
+		return false, errInvalidPath
 	}
 	modelRoot, err := modelRootPath(a.cfg.DataDir, modelID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	thumbDir := filepath.Join(modelRoot, "thumbs")
 	thumbPath, err := containedName(thumbDir, fileID+".png")
 	if err != nil {
-		return err
+		return false, err
 	}
 	legacyFilePath, err := containedName(thumbDir, fileID+".jpg")
 	if err != nil {
-		return err
+		return false, err
 	}
 	a.modelPersistMu.Lock()
 	defer a.modelPersistMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 	var exists int
 	if err := a.db.QueryRow(`SELECT COUNT(*) FROM files WHERE id = ? AND model_id = ? AND rel_path = ?`, fileID, modelID, relPath).Scan(&exists); err != nil {
-		return err
+		return false, err
 	}
 	if exists == 0 {
 		_, err := a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
-		return err
+		return false, err
 	}
+	mutation, err := a.beginMutation(modelID)
+	if err != nil {
+		return false, err
+	}
+	defer mutation.finishOnReturn(&err)
 	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(prepared, thumbPath); err != nil {
-		return err
+		return false, err
 	}
 	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	updated, err := updateRes.RowsAffected()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if updated != 1 {
 		_ = os.Remove(thumbPath)
 		_, _ = a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
-		return nil
+		return false, nil
 	}
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
 	var primary, largestFileID string
 	if err := a.db.QueryRow(`SELECT COALESCE(primary_thumb, '') FROM models WHERE id = ?`, modelID).Scan(&primary); err != nil {
-		return err
+		return false, err
 	}
 	if err := a.db.QueryRow(`SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
-		return err
+		return false, err
 	}
 	legacyCardPath := filepath.Join(thumbDir, "card.jpg")
 	migratesLegacyPrimary := primary == "card.jpg" && filesHaveEqualContents(legacyFilePath, legacyCardPath)
 	if (fileID == largestFileID && primary == "") || migratesLegacyPrimary {
 		cardPath := filepath.Join(thumbDir, "card.png")
 		if err := copyFile(cardPath, thumbPath); err != nil {
-			return err
+			return false, err
 		}
 		if err := writePrimaryThumbSource(modelRoot, fileID); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	m, err := a.getModel(modelID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := a.writeSidecar(m); err != nil {
-		return err
+		return false, err
 	}
 	if err := a.finishThumbnailJob(jobID, "done", ""); err != nil {
-		return err
+		return false, err
 	}
-	_ = os.Remove(legacyFilePath)
+	if err := a.removeStorageFile(legacyFilePath); err != nil {
+		return false, err
+	}
 	if migratesLegacyPrimary || primary == "card.png" {
-		_ = os.Remove(legacyCardPath)
+		if err := a.removeStorageFile(legacyCardPath); err != nil {
+			return false, err
+		}
 	}
-	a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: thumbRel})
-	return nil
+	return true, nil
 }
 
 func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
 	a.modelPersistMu.Lock()
 	defer a.modelPersistMu.Unlock()
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	if a.maintenance.Load() {
+		return "", "", nil
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", "", err
@@ -372,13 +389,25 @@ func copyFile(dst, src string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.CreateTemp(filepath.Dir(dst), ".copy-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	defer os.Remove(out.Name())
+	err = out.Chmod(0o644)
+	if err == nil {
+		_, err = io.Copy(out, in)
+	}
+	if err == nil {
+		err = out.Sync()
+	}
+	if err := errors.Join(err, out.Close()); err != nil {
+		return err
+	}
+	if err := os.Rename(out.Name(), dst); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(dst))
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {

@@ -24,3 +24,4 @@ tmp/
 /data/
 /backups/
 /.restore/
+/.mutations/
