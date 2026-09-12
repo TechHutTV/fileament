@@ -1205,7 +1205,11 @@ func (a *App) insertModel(model Model) error {
 }
 
 func (a *App) writeSidecar(model Model) error {
-	path := filepath.Join(a.cfg.DataDir, "models", model.ID, "model.json")
+	root, err := modelRootPath(a.cfg.DataDir, model.ID)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(root, "model.json")
 	tmp := path + ".tmp"
 	b, err := json.MarshalIndent(model, "", "  ")
 	if err != nil {

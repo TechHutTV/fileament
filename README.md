@@ -161,6 +161,8 @@ docker stop fileament
 docker start fileament
 ```
 
+Restore and startup reconstruction reject invalid model metadata: model, file, and image IDs must be canonical ULIDs; assets must belong to their model and use the expected `files/`, `images/`, and `thumbs/` paths. Existing per-file JPEG thumbnails remain supported for migration to PNG. Do not rename IDs or edit stored paths by hand.
+
 Test restores before relying on a backup process.
 
 ## Updating

@@ -160,19 +160,31 @@ func (a *App) processNextThumbnail() (err error) {
 	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
 		return err
 	}
-	meshPath := filepath.Join(a.cfg.DataDir, "models", modelID, relPath)
-	if safe, pathErr := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), relPath); pathErr != nil {
-		err = pathErr
+	modelRoot, err := modelRootPath(a.cfg.DataDir, modelID)
+	if err != nil {
 		return err
-	} else {
-		meshPath = safe
+	}
+	if !validStorageID(fileID) || !validAssetPath(relPath, "files") {
+		return errInvalidPath
+	}
+	meshPath, err := containedPath(modelRoot, relPath)
+	if err != nil {
+		return err
+	}
+	thumbDir := filepath.Join(modelRoot, "thumbs")
+	thumbPath, err := containedName(thumbDir, fileID+".png")
+	if err != nil {
+		return err
+	}
+	legacyFilePath, err := containedName(thumbDir, fileID+".jpg")
+	if err != nil {
+		return err
 	}
 	_, tris, err := mesh.ParseFile(meshPath)
 	if err != nil {
 		return err
 	}
 	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))
-	thumbPath := filepath.Join(a.cfg.DataDir, "models", modelID, thumbRel)
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
 		return err
 	}
@@ -202,15 +214,14 @@ func (a *App) processNextThumbnail() (err error) {
 	if err := a.db.QueryRow(`SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
 		return err
 	}
-	legacyFilePath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", fileID+".jpg")
-	legacyCardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.jpg")
+	legacyCardPath := filepath.Join(thumbDir, "card.jpg")
 	migratesLegacyPrimary := primary == "card.jpg" && filesHaveEqualContents(legacyFilePath, legacyCardPath)
 	if (fileID == largestFileID && primary == "") || migratesLegacyPrimary {
-		cardPath := filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs", "card.png")
+		cardPath := filepath.Join(thumbDir, "card.png")
 		if err := copyFile(cardPath, thumbPath); err != nil {
 			return err
 		}
-		if err := writePrimaryThumbSource(filepath.Join(a.cfg.DataDir, "models", modelID), fileID); err != nil {
+		if err := writePrimaryThumbSource(modelRoot, fileID); err != nil {
 			return err
 		}
 		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {

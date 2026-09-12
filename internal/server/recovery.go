@@ -30,7 +30,7 @@ func (a *App) rebuildFromSidecars() error {
 			return err
 		}
 		if m.ID == "" || filepath.Base(path) != m.ID {
-			return filepath.SkipDir
+			return errors.New("model sidecar identifier does not match its directory")
 		}
 		if err := a.upsertSidecarModel(m); err != nil {
 			return err
@@ -80,6 +80,9 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, descriptio
 }
 
 func (a *App) upsertSidecarModel(m Model) error {
+	if err := validateSidecarModel(m); err != nil {
+		return err
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -92,11 +95,16 @@ ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.descrip
 		return err
 	}
 	for _, f := range m.Files {
-		if _, err := tx.Exec(`INSERT INTO files(id,model_id,filename,rel_path,format,size_bytes,sha256,triangle_count,bbox_x,bbox_y,bbox_z,thumb_path,sort_order)
+		result, err := tx.Exec(`INSERT INTO files(id,model_id,filename,rel_path,format,size_bytes,sha256,triangle_count,bbox_x,bbox_y,bbox_z,thumb_path,sort_order)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, rel_path=excluded.rel_path, format=excluded.format, size_bytes=excluded.size_bytes, sha256=excluded.sha256, triangle_count=excluded.triangle_count, bbox_x=excluded.bbox_x, bbox_y=excluded.bbox_y, bbox_z=excluded.bbox_z, thumb_path=excluded.thumb_path, sort_order=excluded.sort_order`,
-			f.ID, m.ID, f.Filename, f.RelPath, f.Format, f.SizeBytes, f.SHA256, f.TriangleCount, f.BBoxX, f.BBoxY, f.BBoxZ, emptyNull(f.ThumbPath), f.SortOrder); err != nil {
+ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, rel_path=excluded.rel_path, format=excluded.format, size_bytes=excluded.size_bytes, sha256=excluded.sha256, triangle_count=excluded.triangle_count, bbox_x=excluded.bbox_x, bbox_y=excluded.bbox_y, bbox_z=excluded.bbox_z, thumb_path=excluded.thumb_path, sort_order=excluded.sort_order
+WHERE files.model_id = excluded.model_id`,
+			f.ID, m.ID, f.Filename, f.RelPath, f.Format, f.SizeBytes, f.SHA256, f.TriangleCount, f.BBoxX, f.BBoxY, f.BBoxZ, emptyNull(f.ThumbPath), f.SortOrder)
+		if err != nil {
 			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return errors.New("file identifier belongs to another model")
 		}
 		var n int
 		_ = tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE file_id = ? AND type = 'thumbnail'`, f.ID).Scan(&n)
@@ -107,9 +115,14 @@ ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, rel_path=excluded.rel_
 		}
 	}
 	for _, img := range m.Images {
-		if _, err := tx.Exec(`INSERT INTO images(id,model_id,rel_path,sort_order) VALUES(?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET rel_path=excluded.rel_path, sort_order=excluded.sort_order`, img.ID, m.ID, img.RelPath, img.SortOrder); err != nil {
+		result, err := tx.Exec(`INSERT INTO images(id,model_id,rel_path,sort_order) VALUES(?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET rel_path=excluded.rel_path, sort_order=excluded.sort_order
+WHERE images.model_id = excluded.model_id`, img.ID, m.ID, img.RelPath, img.SortOrder)
+		if err != nil {
 			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return errors.New("image identifier belongs to another model")
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM model_tags WHERE model_id = ?`, m.ID); err != nil {

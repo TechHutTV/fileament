@@ -378,6 +378,9 @@ func validateStagedData(dataRoot string, manifest backupManifest) error {
 		if err := json.Unmarshal(contents, &model); err != nil || model.ID != dir.Name() {
 			return errors.New("backup model sidecar is invalid")
 		}
+		if err := validateSidecarModel(model); err != nil {
+			return fmt.Errorf("invalid backup model sidecar: %w", err)
+		}
 		databaseModel, err := stagedApp.getModel(model.ID)
 		if err != nil {
 			return errors.New("backup model sidecar does not match its database")
