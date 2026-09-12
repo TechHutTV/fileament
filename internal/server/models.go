@@ -35,7 +35,7 @@ type Model struct {
 	TotalBytes   int64       `json:"totalBytes"`
 	CreatedAt    int64       `json:"createdAt"`
 	UpdatedAt    int64       `json:"updatedAt"`
-	Files        []ModelFile `json:"files,omitempty"`
+	Files        []ModelFile `json:"files"`
 	Images       []Image     `json:"images,omitempty"`
 	Tags         []string    `json:"tags,omitempty"`
 }
@@ -1238,7 +1238,7 @@ func (a *App) writeSidecar(model Model) error {
 }
 
 func (a *App) getModel(id string) (Model, error) {
-	var m Model
+	m := Model{Files: []ModelFile{}}
 	err := a.db.QueryRow(`SELECT id,title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),COALESCE(primary_thumb,''),total_bytes,created_at,updated_at FROM models WHERE id = ?`, id).
 		Scan(&m.ID, &m.Title, &m.Description, &m.SourceURL, &m.License, &m.Author, &m.PrimaryThumb, &m.TotalBytes, &m.CreatedAt, &m.UpdatedAt)
 	if err != nil {

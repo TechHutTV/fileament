@@ -128,6 +128,8 @@ At most two meshes are parsed concurrently, with a 30-second deadline including 
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
+Deleting the last variant keeps the model's metadata, images, and collection membership. Empty models remain visible in the catalog and share pages; the owner can add new variants or delete the model. Model API responses always include a `files` array, which is empty when there are no variants.
+
 ### Preview and download
 
 Supported meshes can be opened in the browser viewer. Files larger than 50 MiB, files with more than 250,000 triangles, and files without valid geometry statistics wait for **Load 3D view** before loading. This applies to owner and public share pages; each variant requires its own confirmation. Original files remain available for download, and each variation can be renamed inline without changing its file format.
