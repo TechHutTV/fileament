@@ -128,6 +128,8 @@ At most two meshes are parsed concurrently, with a 30-second deadline including 
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
+Catalog and collection cards load summaries. Use **Load more models** to browse larger collections; ordering controls work across page boundaries. The cover selector includes loaded members and preserves the current cover when it is on another page.
+
 Tags with the same normalized slug share the existing label. Reusing a tag does not rename it on other models.
 
 Deleting the last variant keeps the model's metadata, images, and collection membership. Empty models remain visible in the catalog and share pages; the owner can add new variants or delete the model. Model API responses always include a `files` array, which is empty when there are no variants.
@@ -222,6 +224,22 @@ API responses, owner assets, public shared assets and share pages use `Cache-Con
 Owner and share pages reject framing and send no referrer information on outgoing requests. The content security policy also blocks plugins, foreign base URLs, and cross-origin form targets. It leaves script, style, image, and connection sources unrestricted so the existing viewer and Markdown image behavior remain supported. Raw mesh responses retain their stricter sandbox policy.
 
 Only explicit share links are public. Owner pages and model assets require an authenticated session.
+
+## Catalog and collection API
+
+Owner endpoints require a session cookie. List responses contain card summaries: `id`, `title`, optional `primaryThumb`, `totalBytes`, `createdAt`, `updatedAt`, and `files`. A summary's `files` array contains only the first variant's `format` and `triangleCount`, or is empty. Descriptions, tags, images, and complete variant metadata are returned by model detail endpoints.
+
+| Endpoint | Response and pagination |
+| --- | --- |
+| `GET /api/models` | `{items, nextCursor}` with summaries. Supports `q`, `tag`, `collection`, `sort`, `limit`, and `cursor`. Sort values are `created`, `updated`, `title`, and `size`. |
+| `GET /api/models/{id}` | Complete owner model, including all variants, images, and metadata. |
+| `GET /api/collections` | Collection metadata, `coverThumb`, `modelCount`, and `containsModel`. Supply `?model={id}` to check that model's membership without downloading every member ID. |
+| `GET /api/collections/{id-or-slug}` | Collection metadata, total `modelCount`, and one page of summary `models` and matching `modelIds`, plus `nextCursor`. Supports `limit` and `cursor`. |
+| `PATCH /api/collections/{id}` | Updates metadata and returns the first page in the same shape as collection detail. |
+| `PUT /api/collections/{id}/order` | Accepts either the complete `{modelIds:[...]}` order, or `{modelId:"...", direction:"up"}` / `"down"` to move one member relative to its current neighbor. Returns `204`. |
+| `GET /api/public/{token}` | For a model share, returns `{share, model}`. For a collection share, returns `{share, collection, model}`: a paginated collection summary plus one complete selected model. Use `model={id}` to select a current member, including one outside the current page; otherwise the first member of the page is selected. An empty collection has `model: null`. Supports `limit` and `cursor` for collection pages. |
+
+Pages default to 24 entries and accept limits from 1 to 100; invalid limits use the default. Pass `nextCursor` unchanged to load the next page. An empty cursor marks the end. Collection cursors belong to that collection and use position plus model ID as a stable tie-breaker. Restart pagination after changing membership or order. Public requests recheck the token and exact model membership; revoked or expired tokens return `410`, unavailable targets return `404`, and invalid cursors return `400`.
 
 ## Build from source
 

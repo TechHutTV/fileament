@@ -653,8 +653,8 @@ test('renders selected collection cover thumbnails with a folder fallback', asyn
     const url = String(input);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/collections')) return Response.json([
-      { id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', coverModelId: 'm1', coverThumb: coverReady ? 'card.png' : undefined, modelIds: ['m1'] },
-      { id: 'c2', name: 'Unsorted', slug: 'unsorted', description: '', modelIds: [] },
+      { id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', coverModelId: 'm1', coverThumb: coverReady ? 'card.png' : undefined, modelCount: 1 },
+      { id: 'c2', name: 'Unsorted', slug: 'unsorted', description: '', modelCount: 0 },
     ]);
     return Response.json({});
   }));
@@ -878,7 +878,7 @@ test('detail management actions call owner APIs and preserve viewer gate', async
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
     if (url.includes('/api/models/m1')) return Response.json(model);
-    if (url.includes('/api/collections')) return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', modelIds: ['m1'] }]);
+    if (url.includes('/api/collections')) return Response.json([{ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', modelCount: 1, containsModel: true }]);
     if (url.includes('/api/shares')) return Response.json([]);
     if (init?.method === 'PATCH' || init?.method === 'POST' || init?.method === 'DELETE' || init?.method === 'PUT') return Response.json(model);
     return Response.json({});
@@ -1068,8 +1068,8 @@ test('collection detail supports metadata, cover, ordering, and confirmed remova
     const url = String(input);
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
-    if (url.includes('/api/collections/fixtures')) return Response.json({ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: 'Useful parts', coverModelId: 'm1', modelIds: ['m1', 'm2'], models: [model, second] });
-    if (init?.method === 'PATCH') return Response.json({ id: 'c1', name: 'Updated Fixtures', slug: 'fixtures', description: '', coverModelId: 'm2', modelIds: ['m1', 'm2'], models: [model, second] });
+    if (url.includes('/api/collections/fixtures')) return Response.json({ id: 'c1', name: 'Fixtures', slug: 'fixtures', description: 'Useful parts', coverModelId: 'm1', modelCount: 2, modelIds: ['m1', 'm2'], models: [model, second] });
+    if (init?.method === 'PATCH') return Response.json({ id: 'c1', name: 'Updated Fixtures', slug: 'fixtures', description: '', coverModelId: 'm2', modelCount: 2, modelIds: ['m1', 'm2'], models: [model, second] });
     return new Response(null, { status: 204 });
   }));
   renderApp();
@@ -1107,9 +1107,9 @@ test('public collection cards select models within the same share and use token 
       statusRequests += 1;
       return new Response(null, { status: statusCode });
     }
-    if (url === '/api/public/sharetoken') {
+    if (url === '/api/public/sharetoken?model=m1') {
       publicRequests += 1;
-      return Response.json({ share: { expiresAt: Math.floor(Date.now() / 1000) + 3600 }, collection: { id: 'c1', name: 'Shared', slug: 'shared', description: '', models: [{ ...model, primaryThumb: 'card.jpg' }] } });
+      return Response.json({ model: { ...model, primaryThumb: 'card.jpg' }, share: { expiresAt: Math.floor(Date.now() / 1000) + 3600 }, collection: { id: 'c1', name: 'Shared', slug: 'shared', description: '', models: [{ ...model, primaryThumb: 'card.jpg' }] } });
     }
     return Response.json({});
   }));

@@ -53,9 +53,11 @@ export type Model = {
   images?: ModelImage[];
   tags?: string[];
 };
-type Page = { items: Model[]; nextCursor: string };
+type ModelSummary = Pick<Model, 'id' | 'title' | 'primaryThumb' | 'totalBytes'> & { files: Pick<ModelFile, 'format' | 'triangleCount'>[] };
+type Page = { items: ModelSummary[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean };
-type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: Model[] };
+type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: ModelSummary[]; modelCount: number; containsModel?: boolean; nextCursor?: string };
+type PublicPageData = { share?: Share; model?: Model | null; collection?: Collection };
 type Share = { id: string; token: string; url?: string; scope: 'model' | 'collection'; targetId: string; targetName?: string; label?: string; expiresAt?: number; revokedAt?: number; hitCount: number; createdAt: number };
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
@@ -195,7 +197,7 @@ function Catalog() {
   );
 }
 
-function ModelCard({ model }: { model: Model }) {
+function ModelCard({ model }: { model: ModelSummary }) {
   const src = model.primaryThumb ? `/thumbs/${model.id}/${model.primaryThumb}` : '';
   const file = model.files[0];
   return (
@@ -209,7 +211,7 @@ function ModelCard({ model }: { model: Model }) {
 function Detail({ id }: { id: string }) {
   const qc = useQueryClient();
   const { data: model, isLoading, isError } = useQuery<Model>({ queryKey: ['model', id], queryFn: () => api(`/api/models/${id}`) });
-  const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
+  const collections = useQuery<Collection[]>({ queryKey: ['collections', id], queryFn: () => api(`/api/collections?model=${encodeURIComponent(id)}`) });
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [selectedFileID, setSelectedFileID] = useState('');
   const [forceViewer, setForceViewer] = useState(false);
@@ -724,35 +726,38 @@ function CollectionsPage() {
     {isError && <Empty text="Collections could not be loaded" />}
     {isLoading && <Empty text="Loading collections" />}
     {!isLoading && !isError && (data?.length ?? 0) === 0 && <EmptyState icon={<Folder size={28} />} title="No collections yet" text="Create your first collection above, then add models from your library." />}
-    <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelIds?.length ?? c.models?.length ?? 0; const cover = c.coverModelId && c.coverThumb ? `/thumbs/${c.coverModelId}/${c.coverThumb}` : ''; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className={`collection-cover${cover ? ' has-image' : ''}`}>{cover ? <img src={cover} alt={`${c.name} cover`} loading="lazy" /> : <Folder size={34} aria-hidden />}<span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
+    <div className="grid collection-grid">{(data ?? []).map((c) => { const count = c.modelCount; const cover = c.coverModelId && c.coverThumb ? `/thumbs/${c.coverModelId}/${c.coverThumb}` : ''; return <a className="card collection-card" href={`/collections/${c.slug}`} key={c.id}><div className={`collection-cover${cover ? ' has-image' : ''}`}>{cover ? <img src={cover} alt={`${c.name} cover`} loading="lazy" /> : <Folder size={34} aria-hidden />}<span>{count} {count === 1 ? 'model' : 'models'}</span></div><div className="card-body"><h2>{c.name}</h2><p>{c.description || 'No description'}</p></div></a>; })}</div>
   </section>;
 }
 
 function CollectionDetail({ slug }: { slug: string }) {
   const qc = useQueryClient();
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
-  const { data } = useQuery<Collection>({ queryKey: ['collection', slug], queryFn: () => api(`/api/collections/${slug}`) });
+  const page = useInfiniteQuery({
+    queryKey: ['collection', slug], initialPageParam: '',
+    queryFn: ({ pageParam }) => api(`/api/collections/${slug}${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ''}`) as Promise<Collection>,
+    getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
+  });
+  const data = page.data?.pages[0];
+  const models = [...new Map((page.data?.pages.flatMap((p) => p.models ?? []) ?? []).map((m) => [m.id, m])).values()];
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['collection', slug] }); qc.invalidateQueries({ queryKey: ['collections'] }); };
-  const patch = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: (updated) => { qc.setQueryData(['collection', slug], updated); qc.invalidateQueries({ queryKey: ['collections'] }); if (updated.slug !== slug) navigate(`/collections/${updated.slug}`, true); } });
-  const reorder = useMutation({ mutationFn: (modelIds: string[]) => api(`/api/collections/${data?.id}/order`, { method: 'PUT', body: JSON.stringify({ modelIds }) }), onSuccess: invalidate });
+  const patch = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: (updated) => { invalidate(); if (updated.slug !== slug) navigate(`/collections/${updated.slug}`, true); } });
+  const reorder = useMutation({ mutationFn: (body: { modelId: string; direction: 'up' | 'down' }) => api(`/api/collections/${data?.id}/order`, { method: 'PUT', body: JSON.stringify(body) }), onSuccess: invalidate });
   const removeMember = useMutation({ mutationFn: (modelID: string) => api(`/api/collections/${data?.id}/models/${modelID}`, { method: 'DELETE' }), onSuccess: () => { setConfirmation(null); invalidate(); } });
   const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => navigate('/collections') });
   const share = useMutation({ mutationFn: (body: { label: string; expiresAt: number }) => api('/api/shares', { method: 'POST', body: JSON.stringify({ scope: 'collection', targetId: data?.id, ...body }) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   const resetRemovalState = () => { remove.reset(); removeMember.reset(); };
-  if (!data) return <section className="content"><Empty text="Loading collection" /></section>;
-  const move = (index: number, delta: number) => {
-    const modelIds = [...(data.modelIds ?? data.models?.map((model) => model.id) ?? [])];
-    const target = index + delta;
-    if (target < 0 || target >= modelIds.length) return;
-    [modelIds[index], modelIds[target]] = [modelIds[target], modelIds[index]];
-    reorder.mutate(modelIds);
-  };
+  if (!data) return <section className="content"><Empty text={page.isError ? 'Collection could not be loaded' : 'Loading collection'} /></section>;
   return <section className="content">
-    <CollectionForm collection={data} onSave={(body) => patch.mutate(body)} />
+    <CollectionForm collection={data} models={models} onSave={(body) => patch.mutate(body)} />
     <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => { resetRemovalState(); setConfirmation({ title: 'Delete collection?', description: `Delete “${data.name}”? Its models stay in your library.`, confirmLabel: 'Delete collection', onConfirm: () => remove.mutate() }); }}><Trash2 size={16} />Delete collection</button></div>
     {shares.data?.filter((s) => s.scope === 'collection' && s.targetId === data.id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}
-    <div className="collection-models">{data.models?.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === (data.models?.length ?? 0) - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => { resetRemovalState(); setConfirmation({ title: 'Remove from collection?', description: `Remove “${model.title}” from “${data.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => removeMember.mutate(model.id) }); }}><Trash2 size={16} /></button></div></div>)}</div>
+    <p>{models.length} of {data.modelCount} models shown</p>
+    {reorder.isError && <p role="alert">The collection order could not be saved.</p>}
+    <div className="collection-models">{models.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0 || reorder.isPending} onClick={() => reorder.mutate({ modelId: model.id, direction: 'up' })}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === data.modelCount - 1 || reorder.isPending} onClick={() => reorder.mutate({ modelId: model.id, direction: 'down' })}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => { resetRemovalState(); setConfirmation({ title: 'Remove from collection?', description: `Remove “${model.title}” from “${data.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => removeMember.mutate(model.id) }); }}><Trash2 size={16} /></button></div></div>)}</div>
+    {page.isError && <p role="alert">Collection models could not be loaded. Try again.</p>}
+    {page.hasNextPage && <button type="button" className="load" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more models'}</button>}
     <ConfirmationDialog request={confirmation} busy={remove.isPending || removeMember.isPending} error={remove.isError || removeMember.isError ? 'This change could not be completed. Try again.' : undefined} onCancel={() => setConfirmation(null)} />
   </section>;
 }
@@ -760,13 +765,22 @@ function CollectionDetail({ slug }: { slug: string }) {
 function PublicPage({ token }: { token: string }) {
   const selected = new URLSearchParams(window.location.search).get('model');
   const [unavailable, setUnavailable] = useState(false);
-  const { data, isError } = useQuery<{ share?: Share; model?: Model; collection?: Collection }>({
-    queryKey: ['public', token],
-    queryFn: () => api(`/api/public/${token}`),
+  const page = useInfiniteQuery({
+    queryKey: ['public', token, selected],
+    initialPageParam: '',
+    queryFn: ({ pageParam }) => {
+      const query = new URLSearchParams();
+      if (selected) query.set('model', selected);
+      if (pageParam) query.set('cursor', pageParam);
+      return api(`/api/public/${token}${query.size ? `?${query}` : ''}`) as Promise<PublicPageData>;
+    },
+    getNextPageParam: (lastPage) => lastPage.collection?.nextCursor || undefined,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  const data = page.data?.pages[0];
+  const members = [...new Map((page.data?.pages.flatMap((p) => p.collection?.models ?? []) ?? []).map((m) => [m.id, m])).values()];
   useEffect(() => {
     let active = true;
     setUnavailable(false);
@@ -807,9 +821,9 @@ function PublicPage({ token }: { token: string }) {
     expire();
     return () => window.clearTimeout(timeout);
   }, [data?.share?.expiresAt]);
-  if (isError || unavailable) return <Shell><Empty text="Share not available" /></Shell>;
-  const model = data?.model ?? data?.collection?.models?.find((m) => m.id === selected) ?? data?.collection?.models?.[0];
-  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel key={model.id} model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
+  if ((!data && page.isError) || unavailable) return <Shell><Empty text="Share not available" /></Shell>;
+  const model = data?.model;
+  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{members.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}{page.hasNextPage && <button type="button" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more models'}</button>}{page.isError && <span role="alert">More models could not be loaded. Try again.</span>}</div>}{model ? <PublicModel key={model.id} model={model} token={token} /> : <Empty text={data?.collection ? 'No models in this collection' : 'Loading share'} />}</section></Shell>;
 }
 
 function PublicModel({ model, token }: { model: Model; token: string }) {
@@ -824,15 +838,15 @@ function CollectionMembership({ collections, model }: { collections: Collection[
   const qc = useQueryClient();
   const [collectionToLeave, setCollectionToLeave] = useState<Collection | null>(null);
   const mutate = useMutation({ mutationFn: ({ collectionID, has }: { collectionID: string; has: boolean }) => api(`/api/collections/${collectionID}/models/${model.id}`, { method: has ? 'DELETE' : 'PUT' }), onSuccess: () => { setCollectionToLeave(null); qc.invalidateQueries({ queryKey: ['collections'] }); } });
-  return <div className="checks">{collections.map((c) => { const has = c.modelIds?.includes(model.id) ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => { mutate.reset(); if (has) setCollectionToLeave(c); else mutate.mutate({ collectionID: c.id, has: false }); }} />{c.name}</label>; })}<ConfirmationDialog request={collectionToLeave ? { title: 'Remove from collection?', description: `Remove “${model.title}” from “${collectionToLeave.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => mutate.mutate({ collectionID: collectionToLeave.id, has: true }) } : null} busy={mutate.isPending} error={mutate.isError ? 'The model could not be removed from this collection. Try again.' : undefined} onCancel={() => setCollectionToLeave(null)} /></div>;
+  return <div className="checks">{collections.map((c) => { const has = c.containsModel ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => { mutate.reset(); if (has) setCollectionToLeave(c); else mutate.mutate({ collectionID: c.id, has: false }); }} />{c.name}</label>; })}<ConfirmationDialog request={collectionToLeave ? { title: 'Remove from collection?', description: `Remove “${model.title}” from “${collectionToLeave.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => mutate.mutate({ collectionID: collectionToLeave.id, has: true }) } : null} busy={mutate.isPending} error={mutate.isError ? 'The model could not be removed from this collection. Try again.' : undefined} onCancel={() => setCollectionToLeave(null)} /></div>;
 }
 
-function CollectionForm({ collection, onSave }: { collection?: Collection; onSave: (body: Partial<Collection>) => void }) {
+function CollectionForm({ collection, models = collection?.models ?? [], onSave }: { collection?: Collection; models?: ModelSummary[]; onSave: (body: Partial<Collection>) => void }) {
   const [name, setName] = useState(collection?.name ?? '');
   const [description, setDescription] = useState(collection?.description ?? '');
   const [coverModelId, setCoverModelId] = useState(collection?.coverModelId ?? '');
   useEffect(() => { setName(collection?.name ?? ''); setDescription(collection?.description ?? ''); setCoverModelId(collection?.coverModelId ?? ''); }, [collection?.id, collection?.name, collection?.description, collection?.coverModelId]);
-  return <form className="stack inline-form" onSubmit={(e) => { e.preventDefault(); onSave({ name, description, coverModelId }); }}><label>{collection ? 'Collection name' : 'Name'}<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>{collection ? 'Collection description' : 'Description'}<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>{collection && <label>Cover model<select value={coverModelId} onChange={(e) => setCoverModelId(e.target.value)}><option value="">Automatic</option>{collection.models?.map((model) => <option key={model.id} value={model.id}>{model.title}</option>)}</select></label>}<button type="submit"><Plus size={16} />{collection ? 'Save collection' : 'Create collection'}</button></form>;
+  return <form className="stack inline-form" onSubmit={(e) => { e.preventDefault(); onSave({ name, description, coverModelId }); }}><label>{collection ? 'Collection name' : 'Name'}<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>{collection ? 'Collection description' : 'Description'}<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>{collection && <label>Cover model<select value={coverModelId} onChange={(e) => setCoverModelId(e.target.value)}><option value="">Automatic</option>{coverModelId && !models.some((model) => model.id === coverModelId) && <option value={coverModelId}>Current cover</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.title}</option>)}</select></label>}<button type="submit"><Plus size={16} />{collection ? 'Save collection' : 'Create collection'}</button></form>;
 }
 
 function ShareForm({ onCreate }: { onCreate: (body: { label: string; expiresAt: number }) => void }) {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -29,7 +30,9 @@ type Collection struct {
 
 type collectionSummary struct {
 	Collection
-	CoverThumb string `json:"coverThumb,omitempty"`
+	CoverThumb    string `json:"coverThumb,omitempty"`
+	ModelCount    int    `json:"modelCount"`
+	ContainsModel bool   `json:"containsModel"`
 }
 
 type ShareLink struct {
@@ -70,34 +73,25 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 }
 
 func (a *App) handleListCollections(w http.ResponseWriter, r *http.Request) {
-	collections, err := a.listCollections()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	out := make([]collectionSummary, len(collections))
-	indexes := make(map[string]int, len(collections))
-	for i, collection := range collections {
-		out[i].Collection = collection
-		indexes[collection.ID] = i
-	}
-	rows, err := a.db.Query(`SELECT c.id, COALESCE(m.primary_thumb, '') FROM collections c LEFT JOIN models m ON m.id = c.cover_model_id`)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.slug,c.description,COALESCE(c.cover_model_id,''),c.created_at,COALESCE(m.primary_thumb,''),
+		(SELECT COUNT(*) FROM collection_models cm WHERE cm.collection_id=c.id),
+		EXISTS (SELECT 1 FROM collection_models cm WHERE cm.collection_id=c.id AND cm.model_id=?)
+		FROM collections c LEFT JOIN models m ON m.id=c.cover_model_id ORDER BY c.name,c.id`, r.URL.Query().Get("model"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer rows.Close()
+	out := []collectionSummary{}
 	for rows.Next() {
-		var id, coverThumb string
-		if err := rows.Scan(&id, &coverThumb); err != nil {
+		var c collectionSummary
+		if err := rows.Scan(&c.ID, &c.Name, &c.Slug, &c.Description, &c.CoverModelID, &c.CreatedAt, &c.CoverThumb, &c.ModelCount, &c.ContainsModel); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		if i, ok := indexes[id]; ok {
-			out[i].CoverThumb = coverThumb
-		}
+		out = append(out, c)
 	}
-	if err := rows.Err(); err != nil {
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -178,9 +172,10 @@ func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGetCollection(w http.ResponseWriter, r *http.Request) {
-	c, err := a.getCollection(chi.URLParam(r, "id"))
+	query := r.URL.Query()
+	c, err := a.getCollectionPage(r.Context(), chi.URLParam(r, "id"), parseLimit(query.Get("limit"), 24), query.Get("cursor"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
+		writeError(w, collectionReadStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, c)
@@ -220,7 +215,7 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	c, err := a.getCollection(id)
+	c, err := a.getCollectionPage(r.Context(), id, 24, "")
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -263,16 +258,21 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer finish()
 	id, mid := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
-	if _, err := a.getCollection(id); err != nil {
-		writeError(w, http.StatusNotFound, errors.New("collection not found"))
+	var collectionExists, modelExists bool
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM collections WHERE id=?),EXISTS(SELECT 1 FROM models WHERE id=?)`, id, mid).Scan(&collectionExists, &modelExists); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.getModel(mid); err != nil {
-		writeError(w, http.StatusNotFound, errors.New("model not found"))
+	if !collectionExists || !modelExists {
+		writeError(w, http.StatusNotFound, errors.New("collection or model not found"))
 		return
 	}
 	var n int
-	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM collection_models WHERE collection_id = ?`, id).Scan(&n)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(sort_order)+1,0) FROM collection_models WHERE collection_id = ?`, id).Scan(&n); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	if _, err := a.db.Exec(`INSERT OR REPLACE INTO collection_models(collection_id, model_id, sort_order) VALUES(?,?,?)`, id, mid, n); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -326,7 +326,9 @@ func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request
 
 func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ModelIDs []string `json:"modelIds"`
+		ModelIDs  []string `json:"modelIds"`
+		ModelID   string   `json:"modelId"`
+		Direction string   `json:"direction"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -345,6 +347,33 @@ func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("collection not found"))
 		return
+	}
+	if req.ModelID != "" || req.Direction != "" {
+		if req.ModelIDs != nil || req.ModelID == "" || (req.Direction != "up" && req.Direction != "down") {
+			writeError(w, http.StatusBadRequest, errors.New("supply modelIds or a modelId and up/down direction"))
+			return
+		}
+		index := -1
+		for i, id := range collection.ModelIDs {
+			if id == req.ModelID {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			writeError(w, http.StatusNotFound, errors.New("collection model not found"))
+			return
+		}
+		target := index + 1
+		if req.Direction == "up" {
+			target = index - 1
+		}
+		if target < 0 || target >= len(collection.ModelIDs) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		req.ModelIDs = append([]string(nil), collection.ModelIDs...)
+		req.ModelIDs[index], req.ModelIDs[target] = req.ModelIDs[target], req.ModelIDs[index]
 	}
 	if len(req.ModelIDs) != len(collection.ModelIDs) {
 		writeError(w, http.StatusBadRequest, errors.New("modelIds must contain every collection model exactly once"))
@@ -389,12 +418,11 @@ func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *App) getCollection(idOrSlug string) (Collection, error) {
-	var c Collection
-	err := a.db.QueryRow(`SELECT id,name,slug,description,COALESCE(cover_model_id,''),created_at FROM collections WHERE id = ? OR slug = ?`, idOrSlug, idOrSlug).Scan(&c.ID, &c.Name, &c.Slug, &c.Description, &c.CoverModelID, &c.CreatedAt)
+	c, err := a.collectionMetadata(context.Background(), idOrSlug)
 	if err != nil {
 		return c, err
 	}
-	rows, err := a.db.Query(`SELECT model_id FROM collection_models WHERE collection_id = ? ORDER BY sort_order`, c.ID)
+	rows, err := a.db.Query(`SELECT model_id FROM collection_models WHERE collection_id = ? ORDER BY sort_order,model_id`, c.ID)
 	if err != nil {
 		return c, err
 	}
@@ -405,13 +433,8 @@ func (a *App) getCollection(idOrSlug string) (Collection, error) {
 			return c, err
 		}
 		c.ModelIDs = append(c.ModelIDs, id)
-		m, err := a.getModel(id)
-		if err != nil {
-			return c, err
-		}
-		c.Models = append(c.Models, m)
 	}
-	return c, rows.Err()
+	return c, errors.Join(rows.Err(), rows.Close())
 }
 
 func (a *App) writeCollectionsSidecar() error {
@@ -480,20 +503,15 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var targetName string
+	var targetErr error
 	if req.Scope == "model" {
-		model, err := a.getModel(req.TargetID)
-		if err != nil {
-			writeError(w, http.StatusNotFound, errors.New("model not found"))
-			return
-		}
-		targetName = model.Title
+		targetErr = a.db.QueryRowContext(r.Context(), `SELECT title FROM models WHERE id=?`, req.TargetID).Scan(&targetName)
 	} else {
-		collection, err := a.getCollection(req.TargetID)
-		if err != nil {
-			writeError(w, http.StatusNotFound, errors.New("collection not found"))
-			return
-		}
-		targetName = collection.Name
+		targetErr = a.db.QueryRowContext(r.Context(), `SELECT name FROM collections WHERE id=?`, req.TargetID).Scan(&targetName)
+	}
+	if targetErr != nil {
+		writeError(w, collectionReadStatus(targetErr), errors.New("share target is unavailable"))
+		return
 	}
 	token, err := randomBase62(22)
 	if err != nil {
@@ -539,13 +557,35 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"share": share, "model": m})
 		return
 	}
-	c, err := a.getCollection(share.TargetID)
+	query := r.URL.Query()
+	c, err := a.getCollectionPage(r.Context(), share.TargetID, parseLimit(query.Get("limit"), 24), query.Get("cursor"))
 	if err != nil {
-		http.NotFound(w, r)
+		writeError(w, collectionReadStatus(err), err)
 		return
 	}
+	if c.ID != share.TargetID {
+		writeError(w, http.StatusNotFound, errors.New("collection not found"))
+		return
+	}
+	modelID := query.Get("model")
+	if modelID == "" && len(c.Models) > 0 {
+		modelID = c.Models[0].ID
+	}
+	var model *Model
+	if modelID != "" {
+		if !a.collectionContains(share.TargetID, modelID) {
+			writeError(w, http.StatusNotFound, errors.New("model not found"))
+			return
+		}
+		selected, err := a.getModel(modelID)
+		if err != nil {
+			writeError(w, collectionReadStatus(err), err)
+			return
+		}
+		model = &selected
+	}
 	a.recordShareView(&share)
-	writeJSON(w, http.StatusOK, map[string]any{"share": share, "collection": c})
+	writeJSON(w, http.StatusOK, map[string]any{"share": share, "collection": c, "model": model})
 }
 
 func (a *App) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
