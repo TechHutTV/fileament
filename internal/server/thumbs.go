@@ -31,49 +31,10 @@ type ThumbnailEvent struct {
 	ModelID   string `json:"modelId"`
 	FileID    string `json:"fileId"`
 	ThumbPath string `json:"thumbPath"`
+	Status    string `json:"status"`
 }
 
 var thumbnailSlots = make(chan struct{}, 2)
-
-func (a *App) startWorkers() {
-	if a.cfg.ThumbWorkers <= 0 {
-		return
-	}
-	if a.stop == nil {
-		a.stop = make(chan struct{})
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	a.workerCancel = cancel
-	for i := 0; i < a.cfg.ThumbWorkers; i++ {
-		a.workerWG.Add(1)
-		go func() {
-			defer a.workerWG.Done()
-			tick := time.NewTicker(2 * time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-a.stop:
-					return
-				case <-tick.C:
-					_ = a.processNextThumbnailContext(ctx)
-				}
-			}
-		}()
-	}
-}
-
-func (a *App) stopWorkers() {
-	if a.stop == nil {
-		return
-	}
-	close(a.stop)
-	if a.workerCancel != nil {
-		a.workerCancel()
-		a.workerCancel = nil
-	}
-	a.workerWG.Wait()
-	a.stop = nil
-}
 
 func (a *App) refreshThumbnailRenderVersion() error {
 	tx, err := a.db.Begin()
@@ -133,76 +94,84 @@ func (a *App) processNextThumbnail() error {
 	return a.processNextThumbnailContext(context.Background())
 }
 
-func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
+func (a *App) processNextThumbnailContext(ctx context.Context) error {
+	_, err := a.processThumbnailJob(ctx)
+	return err
+}
+
+func (a *App) processThumbnailJob(ctx context.Context) (worked bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
-		return err
+		return worked, err
 	}
 	select {
 	case thumbnailSlots <- struct{}{}:
 		defer func() { <-thumbnailSlots }()
 	case <-ctx.Done():
-		return ctx.Err()
+		return worked, ctx.Err()
 	}
 	a.dataMu.RLock()
 	defer a.dataMu.RUnlock()
 	jobID, fileID, err := a.claimThumbnailJob(ctx)
 	if err != nil || jobID == "" {
-		return err
+		return worked, err
 	}
+	worked = true
+	a.wakeThumbnailWorkers()
+	var modelID, relPath string
 	claimed := true
 	defer func() {
 		if claimed && err != nil {
-			status := "failed"
-			if errors.Is(err, context.Canceled) || errors.Is(err, errMutationRecoveryRequired) {
-				status = "pending"
+			status, finishErr := a.failThumbnailJob(jobID, err)
+			err = errors.Join(err, finishErr)
+			if finishErr == nil && modelID != "" {
+				a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, Status: status})
 			}
-			err = errors.Join(err, a.finishThumbnailJob(jobID, status, err.Error()))
+			a.wakeThumbnailWorkers()
 		}
 	}()
-	var modelID, relPath string
 	if err := a.db.QueryRowContext(ctx, `SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+			return worked, nil
 		}
-		return err
+		return worked, err
 	}
 	modelRoot, err := modelRootPath(a.cfg.DataDir, modelID)
 	if err != nil {
-		return err
+		return worked, err
 	}
 	if !validStorageID(fileID) || !validAssetPath(relPath, "files") {
-		return errInvalidPath
+		return worked, errInvalidPath
 	}
 	meshPath, err := containedPath(modelRoot, relPath)
 	if err != nil {
-		return err
+		return worked, err
 	}
 	_, tris, err := mesh.ParseFileContext(ctx, meshPath)
 	if err != nil {
-		return err
+		return worked, err
 	}
 	prepared, err := os.CreateTemp(filepath.Join(a.cfg.DataDir, "tmp"), "thumbnail-*.png")
 	if err != nil {
-		return err
+		return worked, err
 	}
 	defer os.Remove(prepared.Name())
 	if err := prepared.Close(); err != nil {
-		return err
+		return worked, err
 	}
 	if err := render.RenderPNGContext(ctx, tris, prepared.Name(), 512); err != nil {
-		return err
+		return worked, err
 	}
 	published, err := a.publishThumbnail(ctx, jobID, fileID, modelID, relPath, prepared.Name())
 	if err != nil {
-		return err
+		return worked, err
 	}
 	claimed = false
 	if published {
-		a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))})
+		a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, Status: "done", ThumbPath: filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))})
 	}
-	return nil
+	return worked, nil
 }
 
 func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relPath, prepared string) (published bool, err error) {
@@ -318,14 +287,14 @@ func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
 	}
 	defer tx.Rollback()
 	var jobID, fileID string
-	err = tx.QueryRowContext(ctx, `SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at, id LIMIT 1`).Scan(&jobID, &fileID)
+	err = tx.QueryRowContext(ctx, `SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' AND available_at <= ? ORDER BY available_at, created_at, id LIMIT 1`, time.Now().Unix()).Scan(&jobID, &fileID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'running', attempts = attempts + 1, available_at = 0 WHERE id = ? AND status = 'pending'`, jobID)
 	if err != nil {
 		return "", "", err
 	}
@@ -349,7 +318,7 @@ func (a *App) finishThumbnailJob(jobID, status, diagnostic string) error {
 	if status == "done" || status == "failed" {
 		finished = time.Now().Unix()
 	}
-	if _, err := a.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error = NULLIF(?, ''), finished_at = ? WHERE id = ?`, status, diagnostic, finished, jobID); err != nil {
+	if _, err := a.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error = NULLIF(?, ''), finished_at = ?, available_at = 0 WHERE id = ?`, status, diagnostic, finished, jobID); err != nil {
 		return err
 	}
 	return a.pruneThumbnailJobs(ctx, time.Now())

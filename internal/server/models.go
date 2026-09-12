@@ -84,6 +84,7 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Get("/mesh/{modelID}/{fileID}", a.handleMesh)
 		r.Get("/images/{modelID}/{imageID}", a.handleOwnerImage)
 		r.With(requireJSON).Put("/api/models/{id}/thumb", a.handleSetThumb)
+		r.With(requireJSON).Post("/api/models/{id}/thumbnails/retry", a.handleRetryThumbnails)
 	})
 }
 
@@ -364,7 +365,15 @@ func (a *App) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	jobs, err := a.modelThumbnailStates(r.Context(), m.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Model
+		ThumbnailJobs []thumbnailState `json:"thumbnailJobs"`
+	}{m, jobs})
 }
 
 type patchModelRequest struct {
@@ -991,6 +1000,11 @@ func (a *App) persistStagedModel(stage string, model Model) (err error) {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err == nil {
+			a.wakeThumbnailWorkers()
+		}
+	}()
 	defer mutation.finishOnReturn(&err)
 	root := filepath.Join(a.cfg.DataDir, "models", model.ID)
 	if err := os.Rename(stage, root); err != nil {
@@ -1151,6 +1165,11 @@ func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload sta
 	if err != nil {
 		return Model{}, err
 	}
+	defer func() {
+		if err == nil {
+			a.wakeThumbnailWorkers()
+		}
+	}()
 	defer mutation.finishOnReturn(&err)
 	if err := a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder); err != nil {
 		return Model{}, err

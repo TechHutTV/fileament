@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
@@ -39,9 +39,21 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(queryIndexesMigration); err != nil {
 			return err
 		}
+		version = 3
+	}
+	if version == 3 {
+		if _, err := tx.Exec(thumbnailRetryMigration); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
+
+const thumbnailRetryMigration = `
+ALTER TABLE jobs ADD COLUMN available_at INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX jobs_pending_ready ON jobs(type, status, available_at, created_at, id);
+PRAGMA user_version = 4;
+`
 
 const queryIndexesMigration = `
 CREATE INDEX models_created_id ON models(created_at DESC, id DESC);
