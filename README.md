@@ -106,6 +106,8 @@ Authentication endpoints require JSON, limit request bodies to 16 KiB and passwo
 
 New owner passwords must contain at least 12 characters, counted as Unicode code points, and at most 1024 UTF-8 bytes. This applies to setup, password changes, and the first-boot environment seed. Invalid first-boot seeds stop startup with a diagnostic that does not include the password.
 
+Changing the password revokes every existing session and keeps the current browser signed in with a new cookie. Other browsers must sign in again. Password changes and logout close existing event streams, which reconnect only with a valid session. Streams also recheck authorization before sending events and once per minute while idle. Expired sessions are pruned at startup and at most once per hour during authenticated traffic.
+
 ## Using Fileament
 
 ### Upload models

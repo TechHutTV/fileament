@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/TechHutTV/fileament/internal/config"
 	"github.com/TechHutTV/fileament/internal/storage"
@@ -35,6 +36,7 @@ type App struct {
 	events              map[chan ThumbnailEvent]struct{}
 	eventsReset         chan struct{}
 	authLimits          authenticationLimiter
+	lastSessionCleanup  atomic.Int64
 }
 
 func New(cfg config.Config, webFS fs.FS) (*App, error) {
@@ -130,7 +132,10 @@ func (a *App) initializeData() error {
 	if err := a.refreshThumbnailRenderVersion(); err != nil {
 		return err
 	}
-	return a.recoverThumbnailJobs()
+	if err := a.recoverThumbnailJobs(); err != nil {
+		return err
+	}
+	return a.pruneExpiredSessions(time.Now())
 }
 
 func (a *App) maintenanceMiddleware(next http.Handler) http.Handler {

@@ -99,6 +99,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
 		return
 	}
+	if err := a.pruneExpiredSessions(time.Now()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	var encoded string
 	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -113,31 +117,34 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return
 	}
-	token, err := randomToken(32)
+	session, err := a.createOwnerSession(encoded)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, errSessionStateChanged) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
 		return
 	}
-	expires := time.Now().Add(30 * 24 * time.Hour)
-	if _, err := a.db.Exec(`INSERT INTO sessions(token, expires_at) VALUES(?, ?)`, token, expires.Unix()); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   a.secureCookies(r),
-	})
+	a.setOwnerSessionCookie(w, r, session)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		_, _ = a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		result, err := a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if changed > 0 {
+			a.resetEventStreams()
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(r)})
 	w.WriteHeader(http.StatusNoContent)
@@ -167,10 +174,21 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.db.Exec(`UPDATE settings SET value = ? WHERE key = ?`, hash, ownerHashKey); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, errSessionStateChanged)
 		return
 	}
+	session, err := a.rotateOwnerPassword(encoded, hash, cookie.Value)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errSessionStateChanged) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return
+	}
+	a.setOwnerSessionCookie(w, r, session)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -185,6 +203,9 @@ func (a *App) secureCookies(r *http.Request) bool {
 func (a *App) validSession(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookieName)
 	if err != nil || c.Value == "" {
+		return false
+	}
+	if a.db == nil || a.pruneExpiredSessions(time.Now()) != nil {
 		return false
 	}
 	var expires int64

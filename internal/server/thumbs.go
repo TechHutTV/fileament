@@ -291,16 +291,29 @@ func copyFile(dst, src string) error {
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch, reset := a.subscribeEventStream()
 	defer a.unsubscribeEvents(ch)
+	if !a.eventSessionValid(r) {
+		writeError(w, http.StatusUnauthorized, errSessionStateChanged)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
+	revalidate := time.NewTicker(time.Minute)
+	defer revalidate.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-reset:
 			return
+		case <-revalidate.C:
+			if !a.eventSessionValid(r) {
+				return
+			}
 		case evt := <-ch:
+			if !a.eventSessionValid(r) {
+				return
+			}
 			b, _ := json.Marshal(evt)
 			_, _ = fmt.Fprintf(w, "event: thumbnail\ndata: %s\n\n", b)
 			if flusher != nil {
@@ -308,6 +321,12 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (a *App) eventSessionValid(r *http.Request) bool {
+	a.dataMu.RLock()
+	defer a.dataMu.RUnlock()
+	return !a.maintenance.Load() && a.validSession(r)
 }
 
 func (a *App) subscribeEvents() chan ThumbnailEvent {
