@@ -72,10 +72,10 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Post("/api/models", a.handleCreateModel)
 		r.Post("/api/models/grouped", a.handleCreateGroupedModel)
 		r.Get("/api/models/{id}", a.handleGetModel)
-		r.Patch("/api/models/{id}", a.handlePatchModel)
+		r.With(requireJSON).Patch("/api/models/{id}", a.handlePatchModel)
 		r.Delete("/api/models/{id}", a.handleDeleteModel)
 		r.Post("/api/models/{id}/files", a.handleAddModelFiles)
-		r.Patch("/api/models/{id}/files/{fid}", a.handlePatchModelFile)
+		r.With(requireJSON).Patch("/api/models/{id}/files/{fid}", a.handlePatchModelFile)
 		r.Delete("/api/models/{id}/files/{fid}", a.handleDeleteModelFile)
 		r.Post("/api/models/{id}/images", a.handleAddModelImages)
 		r.Delete("/api/models/{id}/images/{imageID}", a.handleDeleteModelImage)
@@ -83,7 +83,7 @@ func (a *App) mountModelRoutes(r chi.Router) {
 		r.Get("/files/{modelID}/{fileID}", a.handleDownload)
 		r.Get("/mesh/{modelID}/{fileID}", a.handleMesh)
 		r.Get("/images/{modelID}/{imageID}", a.handleOwnerImage)
-		r.Put("/api/models/{id}/thumb", a.handleSetThumb)
+		r.With(requireJSON).Put("/api/models/{id}/thumb", a.handleSetThumb)
 	})
 }
 

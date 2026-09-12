@@ -198,6 +198,8 @@ Fileament serves HTTP directly. Put it behind a trusted reverse proxy for HTTPS 
 
 Set `FILEAMENT_BASE_URL` to the final `https://` URL. Session cookies are always `HttpOnly` and `SameSite=Lax`; they are marked `Secure` when Fileament detects HTTPS through the request, `X-Forwarded-Proto`, or `FILEAMENT_BASE_URL`.
 
+Browser mutations must originate from Fileament itself. Go's origin protection rejects cross-origin unsafe requests, including requests from sibling subdomains, using `Sec-Fetch-Site` or an `Origin`/`Host` comparison for older browsers. Preserve the original `Host` header at the reverse proxy. Command-line clients without browser origin headers remain supported. JSON mutation routes require `Content-Type: application/json`; upload routes continue to accept multipart form data. Rejections return a JSON error with HTTP `403` for cross-origin requests or `415` for an incorrect JSON media type.
+
 Only explicit share links are public. Owner pages and model assets require an authenticated session.
 
 ## Build from source

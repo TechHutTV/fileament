@@ -36,7 +36,7 @@ type backupManifest struct {
 func (a *App) mountBackupRoutes(r chi.Router) {
 	r.With(a.requireDataAuth).Post("/api/backups", a.handleCreateBackup)
 	r.With(a.requireDataAuth).Post("/api/backups/inspect", a.handleInspectBackup)
-	r.With(a.requireDataAuth).Post("/api/backups/restore", a.handleApplyRestore)
+	r.With(a.requireDataAuth, requireJSON).Post("/api/backups/restore", a.handleApplyRestore)
 }
 
 func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
