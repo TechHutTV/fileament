@@ -395,6 +395,13 @@ type patchModelRequest struct {
 
 func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	var req patchModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	m, err := a.getModel(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -402,11 +409,6 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 	}
 	previous := m
 	previous.Tags = append([]string(nil), m.Tags...)
-	var req patchModelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
 	if req.Title != nil {
 		m.Title = strings.TrimSpace(*req.Title)
 	}
@@ -445,6 +447,8 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.collectionPersistMu.Lock()
 	defer a.collectionPersistMu.Unlock()
 	id := chi.URLParam(r, "id")
@@ -491,6 +495,13 @@ type patchModelFileRequest struct {
 
 func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	var req patchModelFileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	model, err := a.getModel(modelID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -505,11 +516,6 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if fileIndex < 0 {
 		writeError(w, http.StatusNotFound, sql.ErrNoRows)
-		return
-	}
-	var req patchModelFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	filename := strings.TrimSpace(req.Filename)
@@ -598,6 +604,8 @@ func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
@@ -672,6 +680,8 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 	modelID, imageID := chi.URLParam(r, "id"), chi.URLParam(r, "imageID")
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	var rel string
 	var size int64
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
@@ -791,6 +801,8 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
 	var thumb sql.NullString
@@ -1104,6 +1116,14 @@ func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload sta
 		return Model{}, err
 	}
 	var maxFileOrder, maxImageOrder int
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Model{}, err
+	}
+	if _, err := a.getModel(modelID); err != nil {
+		return Model{}, err
+	}
 	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder)
 	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM images WHERE model_id = ?`, modelID).Scan(&maxImageOrder)
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
@@ -1226,15 +1246,11 @@ func (a *App) writeSidecar(model Model) error {
 		return err
 	}
 	path := filepath.Join(root, "model.json")
-	tmp := path + ".tmp"
 	b, err := json.MarshalIndent(model, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteFile(path, b, 0o644)
 }
 
 func (a *App) getModel(id string) (Model, error) {

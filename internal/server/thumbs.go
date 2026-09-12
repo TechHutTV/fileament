@@ -147,31 +147,8 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	}
 	a.dataMu.RLock()
 	defer a.dataMu.RUnlock()
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	var jobID, fileID string
-	err = tx.QueryRow(`SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at LIMIT 1`).Scan(&jobID, &fileID)
-	if errors.Is(err, sql.ErrNoRows) {
-		_ = tx.Rollback()
-		return nil
-	}
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	res, err := tx.Exec(`UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	changed, _ := res.RowsAffected()
-	if changed != 1 {
-		_ = tx.Rollback()
-		return nil
-	}
-	if err := tx.Commit(); err != nil {
+	jobID, fileID, err := a.claimThumbnailJob(ctx)
+	if err != nil || jobID == "" {
 		return err
 	}
 	claimed := true
@@ -212,11 +189,36 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	prepared, err := os.CreateTemp(filepath.Join(a.cfg.DataDir, "tmp"), "thumbnail-*.png")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(prepared.Name())
+	if err := prepared.Close(); err != nil {
+		return err
+	}
+	if err := render.RenderPNGContext(ctx, tris, prepared.Name(), 512); err != nil {
+		return err
+	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var exists int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM files WHERE id = ? AND model_id = ? AND rel_path = ?`, fileID, modelID, relPath).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		_, err := a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+		claimed = false
+		return err
+	}
 	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
 		return err
 	}
-	if err := render.RenderPNGContext(ctx, tris, thumbPath, 512); err != nil {
+	if err := os.Rename(prepared.Name(), thumbPath); err != nil {
 		return err
 	}
 	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
@@ -275,6 +277,39 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	return nil
 }
 
+func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	var jobID, fileID string
+	err = tx.QueryRow(`SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at LIMIT 1`).Scan(&jobID, &fileID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	res, err := tx.Exec(`UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
+	if err != nil {
+		return "", "", err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return "", "", err
+	}
+	if changed != 1 {
+		return "", "", nil
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
+	return jobID, fileID, nil
+}
+
 func filesHaveEqualContents(left, right string) bool {
 	leftData, err := os.ReadFile(left)
 	if err != nil {
@@ -294,11 +329,7 @@ func readPrimaryThumbSource(modelRoot string) (string, error) {
 
 func writePrimaryThumbSource(modelRoot, fileID string) error {
 	path := filepath.Join(modelRoot, "thumbs", primaryThumbSourceName)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(fileID+"\n"), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteFile(path, []byte(fileID+"\n"), 0o644)
 }
 
 func copyFile(dst, src string) error {
