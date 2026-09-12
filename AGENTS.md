@@ -204,7 +204,7 @@ Thumbnail work is persisted in the `jobs` table and processed by configured work
 
 ## Backend conventions
 
-- Go version: 1.23; module toolchain: Go 1.23.12.
+- Minimum Go version: 1.26.8; production and CI use the same patched toolchain.
 - Prefer the standard library and current dependencies. New dependencies need a concrete benefit.
 - Keep HTTP handlers thin enough to test through `httptest`, but do not create abstraction layers without repeated need.
 - Use Chi route groups and middleware consistently.
@@ -262,7 +262,7 @@ npm run build
 The maintainer host may not have Go installed. Use the repository’s CI-equivalent container command from the repository root:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine \
+docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine \
   sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/"); go vet $(go list ./... | grep -v "/node_modules/")'
 ```
 

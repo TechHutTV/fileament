@@ -219,7 +219,7 @@ docker run -d \
 
 ## Development
 
-Fileament uses Go 1.23 for the backend and React, TypeScript, and Vite for the frontend. See [`AGENTS.md`](AGENTS.md) for the complete architecture, development workflow, security invariants, and verification requirements.
+Fileament uses Go 1.26.8 or newer from a supported release line for the backend and React, TypeScript, and Vite for the frontend. See [`AGENTS.md`](AGENTS.md) for the complete architecture, development workflow, security invariants, and verification requirements.
 
 Frontend checks run from `web/`:
 
@@ -234,11 +234,13 @@ npm run build
 Go checks can run without installing Go on the host:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine \
+docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine \
   sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/"); go vet $(go list ./... | grep -v "/node_modules/")'
 ```
 
 Generated frontend output is built when needed and must not be committed.
+
+CI also scans the backend with `govulncheck` v1.8.0. Keep the minimum Go version in `go.mod`, the production builder, and the CI images on a supported patch release from the [Go release history](https://go.dev/doc/devel/release). Builds with older toolchains are rejected rather than silently producing an executable with known standard-library vulnerabilities.
 
 ## License
 
