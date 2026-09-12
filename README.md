@@ -118,6 +118,8 @@ Use tags for flexible filtering and collections for curated groups. Collections 
 
 Supported meshes can be opened in the browser viewer. Files larger than 50 MB wait for manual confirmation before loading to avoid freezing the browser. Original files remain available for download, and each variation can be renamed inline without changing its file format.
 
+Raw mesh endpoints serve original bytes as `application/octet-stream` with content sniffing disabled and a sandbox policy. Model files are never served as HTML; download endpoints retain their attachment filenames.
+
 ### Share models and collections
 
 Share links are read-only and scoped to one model or collection. They can expire after a chosen number of days or remain active without an expiration date, and they can be revoked at any time. **Settings → Share links** shows each target, creation and expiration dates, lifecycle status, copy-ready public URL, and shared-page view count. A view is one successful shared-page load; thumbnail, mesh, image, file, and background access-status requests do not inflate it. Open shared pages periodically revalidate access and stop displaying cached content after expiration or revocation. Shared pages are marked `noindex` for search engines.

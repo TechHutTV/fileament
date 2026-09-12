@@ -558,6 +558,9 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachmen
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	http.ServeFile(w, r, path)
 }
 
