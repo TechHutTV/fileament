@@ -920,20 +920,11 @@ func (a *App) ingestGroupedStagedUploads(ctx context.Context, uploads []stagedUp
 		}
 	}
 	defer os.RemoveAll(stage)
-	usedNames := map[string]struct{}{}
+	var names uploadNameAllocator
 	files := make([]ModelFile, 0, len(uploads))
 	var total int64
 	for _, upload := range uploads {
-		base := filepath.Base(upload.Name)
-		name := base
-		for suffix := 1; ; suffix++ {
-			key := strings.ToLower(name)
-			if _, exists := usedNames[key]; !exists {
-				usedNames[key] = struct{}{}
-				break
-			}
-			name = uniqueName(base, suffix)
-		}
+		name := names.allocate(filepath.Base(upload.Name))
 		dst := filepath.Join(stage, "files", name)
 		if err := os.Rename(upload.Path, dst); err != nil {
 			return Model{}, err
@@ -988,6 +979,7 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 	var images []Image
 	var description string
 	var total int64
+	var fileNames, imageNames uploadNameAllocator
 	for _, zf := range zr.File {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, "", err
@@ -1010,8 +1002,12 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 		}
 		switch classifyExt(clean) {
 		case "mesh":
-			dstName := uniqueName(filepath.Base(clean), len(files))
-			dst := filepath.Join(stage, "files", dstName)
+			dstName := fileNames.allocate(filepath.Base(clean))
+			dst, err := containedName(filepath.Join(stage, "files"), dstName)
+			if err != nil {
+				_ = rc.Close()
+				return nil, nil, "", err
+			}
 			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
@@ -1023,8 +1019,12 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 			}
 			files = append(files, mf)
 		case "image":
-			dstName := uniqueName(filepath.Base(clean), len(images))
-			dst := filepath.Join(stage, "images", dstName)
+			dstName := imageNames.allocate(filepath.Base(clean))
+			dst, err := containedName(filepath.Join(stage, "images"), dstName)
+			if err != nil {
+				_ = rc.Close()
+				return nil, nil, "", err
+			}
 			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
@@ -1411,13 +1411,12 @@ func emptyNull(s string) any {
 }
 
 func copyCapped(dst string, src io.Reader, capBytes int64) error {
-	f, err := os.Create(dst)
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	n, err := io.Copy(f, io.LimitReader(src, capBytes+1))
-	if err != nil {
+	if err = errors.Join(err, f.Close()); err != nil {
 		return err
 	}
 	if n > capBytes {
@@ -1483,4 +1482,25 @@ func uniqueName(name string, index int) string {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(filepath.Base(name), ext)
 	return stem + "-" + strconv.FormatInt(int64(index), 10) + ext
+}
+
+type uploadNameAllocator struct {
+	used map[string]struct{}
+	next map[string]int
+}
+
+func (a *uploadNameAllocator) allocate(base string) string {
+	if a.used == nil {
+		a.used, a.next = map[string]struct{}{}, map[string]int{}
+	}
+	baseKey := strings.ToLower(base)
+	for suffix := a.next[baseKey]; ; suffix++ {
+		name := uniqueName(base, suffix)
+		key := strings.ToLower(name)
+		if _, exists := a.used[key]; !exists {
+			a.used[key] = struct{}{}
+			a.next[baseKey] = suffix + 1
+			return name
+		}
+	}
 }

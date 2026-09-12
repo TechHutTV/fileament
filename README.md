@@ -116,6 +116,8 @@ The upload screen supports loose STL, OBJ, and 3MF files plus ZIP archives. Choo
 
 ZIP processing rejects unsafe paths and common junk files. Uploads are streamed into the persistent data volume instead of being buffered in memory.
 
+ZIP mesh and image names are flattened into their respective directories. Duplicate names, including case variants and existing numeric suffixes, receive an available numeric suffix. Each entry gets its own file, so deleting one variant cannot remove another variant's contents.
+
 Mesh processing has separate limits from the upload request size. Each mesh may occupy at most 512 MiB on disk and produce at most 1,000,000 triangles. OBJ and 3MF inputs may contain at most 2,000,000 vertices; STL and OBJ text lines are limited to 1 MiB. Coordinates and transforms must be finite, and final coordinate magnitudes cannot exceed 10¹² model units (millimeters after 3MF unit conversion).
 
 A 3MF package may contain at most 2,048 ZIP entries and 64 MiB of expanded content, including attachments. ZIP metadata reads have a 4 MiB budget. XML and component nesting are limited to 64 levels, and both resource declarations and expanded component visits have a 100,000-item budget. Package validation checks actual expanded bytes before decoding model parts serially. These limits also apply when thumbnail workers read existing files.
