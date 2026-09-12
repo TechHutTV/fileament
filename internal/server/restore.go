@@ -136,7 +136,7 @@ func (a *App) handleInspectBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keep = true
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, backupInspection{RestoreToken: token, Manifest: manifest})
 }
 

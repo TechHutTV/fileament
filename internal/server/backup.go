@@ -66,7 +66,7 @@ func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filename := "fileament-backup-" + strings.NewReplacer(":", "", "-", "").Replace(manifest.CreatedAt) + ".fileament"
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	http.ServeContent(w, r, filename, stat.ModTime(), file)

@@ -324,7 +324,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "private, no-store")
 	flusher, _ := w.(http.Flusher)
 	revalidate := time.NewTicker(time.Minute)
 	defer revalidate.Stop()

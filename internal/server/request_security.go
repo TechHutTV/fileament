@@ -4,7 +4,20 @@ import (
 	"errors"
 	"mime"
 	"net/http"
+	"strings"
 )
+
+func sensitiveCachePolicy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, prefix := range []string{"/api/", "/files/", "/mesh/", "/images/", "/thumbs/", "/s/"} {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				w.Header().Set("Cache-Control", "private, no-store")
+				break
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func protectBrowserOrigin(next http.Handler) http.Handler {
 	protection := http.NewCrossOriginProtection()

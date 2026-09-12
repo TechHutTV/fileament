@@ -200,6 +200,8 @@ Set `FILEAMENT_BASE_URL` to the final `https://` URL. Session cookies are always
 
 Browser mutations must originate from Fileament itself. Go's origin protection rejects cross-origin unsafe requests, including requests from sibling subdomains, using `Sec-Fetch-Site` or an `Origin`/`Host` comparison for older browsers. Preserve the original `Host` header at the reverse proxy. Command-line clients without browser origin headers remain supported. JSON mutation routes require `Content-Type: application/json`; upload routes continue to accept multipart form data. Rejections return a JSON error with HTTP `403` for cross-origin requests or `415` for an incorrect JSON media type.
 
+API responses, owner assets, public shared assets and share pages use `Cache-Control: private, no-store`, including errors and access-status responses. Configure proxies to honor this policy so cached content cannot bypass a later authorization or share-revocation check. Revocation cannot retract a copy someone already downloaded.
+
 Only explicit share links are public. Owner pages and model assets require an authenticated session.
 
 ## Build from source

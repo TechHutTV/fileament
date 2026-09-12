@@ -55,8 +55,8 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	if rec.Code != http.StatusOK {
 		t.Fatalf("backup status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("Cache-Control=%q want no-store", got)
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control=%q want private, no-store", got)
 	}
 	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, ".fileament") {
 		t.Fatalf("Content-Disposition=%q", got)
@@ -155,7 +155,7 @@ func TestRestoreInspectStagesValidBackupWithoutChangingLibrary(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("inspect status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("inspect cache control=%q", rec.Header().Get("Cache-Control"))
 	}
 	var result struct {
