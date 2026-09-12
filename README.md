@@ -242,6 +242,8 @@ docker run -d \
 
 ## Development
 
+See [performance measurements](docs/performance.md) for the reproducible catalog benchmarks and index storage/write tradeoffs.
+
 Fileament uses Go 1.26.8 or newer from a supported release line for the backend and React, TypeScript, and Vite for the frontend. See [`AGENTS.md`](AGENTS.md) for the complete architecture, development workflow, security invariants, and verification requirements.
 
 Frontend checks use Node 22.12 or newer and run from `web/`:

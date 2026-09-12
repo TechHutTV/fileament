@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
@@ -33,9 +33,31 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(jobLifecycleMigration); err != nil {
 			return err
 		}
+		version = 2
+	}
+	if version == 2 {
+		if _, err := tx.Exec(queryIndexesMigration); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
+
+const queryIndexesMigration = `
+CREATE INDEX models_created_id ON models(created_at DESC, id DESC);
+CREATE INDEX models_updated_id ON models(updated_at DESC, id DESC);
+CREATE INDEX models_title_id ON models(title COLLATE NOCASE, id);
+CREATE INDEX models_size_id ON models(total_bytes DESC, id DESC);
+CREATE INDEX files_model_order ON files(model_id, sort_order, filename);
+CREATE INDEX images_model_order ON images(model_id, sort_order);
+CREATE INDEX jobs_pending_order ON jobs(type, status, created_at, id);
+CREATE INDEX jobs_file_id ON jobs(file_id);
+CREATE INDEX collection_models_order ON collection_models(collection_id, sort_order, model_id);
+CREATE INDEX collection_models_model ON collection_models(model_id, collection_id);
+CREATE INDEX model_tags_tag ON model_tags(tag_id, model_id);
+CREATE INDEX sessions_expiry ON sessions(expires_at);
+PRAGMA user_version = 3;
+`
 
 const jobLifecycleMigration = `
 CREATE TABLE jobs_v2 (
