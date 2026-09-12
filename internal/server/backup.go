@@ -2,7 +2,6 @@ package server
 
 import (
 	"archive/zip"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,7 +89,7 @@ func (a *App) createBackupArchive(dir string) (string, backupManifest, error) {
 	if _, err := a.db.Exec(`VACUUM INTO '` + strings.ReplaceAll(filepath.ToSlash(snapshotPath), "'", "''") + `'`); err != nil {
 		return "", manifest, err
 	}
-	snapshot, err := sql.Open("sqlite", "file:"+filepath.ToSlash(snapshotPath))
+	snapshot, err := openSQLite(snapshotPath, nil)
 	if err != nil {
 		return "", manifest, err
 	}

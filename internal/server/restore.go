@@ -2,12 +2,12 @@ package server
 
 import (
 	"archive/zip"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -321,7 +321,7 @@ func validBackupEntryName(name string) bool {
 
 func validateStagedData(dataRoot string, manifest backupManifest) error {
 	dbPath := filepath.Join(dataRoot, "fileament.db")
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	db, err := openSQLite(dbPath, url.Values{"mode": {"ro"}})
 	if err != nil {
 		return err
 	}
@@ -528,10 +528,6 @@ func (a *App) applyRestore(token string) error {
 	if err := validateStagedData(stageData, manifest); err != nil {
 		return err
 	}
-	currentEntries, err := managedTopLevelEntries(a.cfg.DataDir)
-	if err != nil {
-		return err
-	}
 	restoredEntries, err := managedTopLevelEntries(stageData)
 	if err != nil {
 		return err
@@ -542,11 +538,26 @@ func (a *App) applyRestore(token string) error {
 	if _, err := a.createSafetyBackup(); err != nil {
 		return fmt.Errorf("create pre-restore safety backup: %w", err)
 	}
+	closeErr := a.db.Close()
+	a.db = nil
+	if closeErr != nil {
+		return closeErr
+	}
+	currentEntries, err := managedTopLevelEntries(a.cfg.DataDir)
+	if err != nil {
+		return err
+	}
 	journal := restoreJournal{
 		Version:         1,
 		Token:           token,
 		CurrentEntries:  currentEntries,
 		RestoredEntries: restoredEntries,
+	}
+	// Activation can create SQLite journals before restore commits.
+	for _, name := range []string{"fileament.db-wal", "fileament.db-shm", "fileament.db-journal"} {
+		if !containsString(journal.RestoredEntries, name) {
+			journal.RestoredEntries = append(journal.RestoredEntries, name)
+		}
 	}
 	if err := writeRestoreJournal(a.cfg.DataDir, journal); err != nil {
 		return err
@@ -561,11 +572,6 @@ func (a *App) applyRestore(token string) error {
 	if err := syncDirectory(filepath.Dir(rollbackRoot)); err != nil {
 		return err
 	}
-	if err := a.db.Close(); err != nil {
-		_ = os.Remove(filepath.Join(restoreRoot, "state.json"))
-		return err
-	}
-	a.db = nil
 	applyErr := moveRestoreEntries(a.cfg.DataDir, stageData, rollbackRoot, currentEntries, restoredEntries)
 	if applyErr == nil {
 		a.db, applyErr = openDatabase(a.cfg.DataDir)

@@ -160,7 +160,7 @@ func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("add a model before selecting a cover"))
 		return
 	}
-	if _, err := a.db.Exec(`INSERT INTO collections(id,name,slug,description,cover_model_id,created_at) VALUES(?,?,?,?,NULLIF(?,''),?)`, c.ID, c.Name, c.Slug, c.Description, c.CoverModelID, c.CreatedAt); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO collections(id,name,slug,description,cover_model_id,created_at) VALUES(?,?,?,?,NULLIF(?,''),?)`, c.ID, c.Name, c.Slug, c.Description, c.CoverModelID, c.CreatedAt); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
@@ -202,12 +202,12 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.CoverModelID != "" {
-		if !a.collectionContains(id, req.CoverModelID) {
+		if !a.collectionContains(r.Context(), id, req.CoverModelID) {
 			writeError(w, http.StatusBadRequest, errors.New("cover model must belong to the collection"))
 			return
 		}
 	}
-	if _, err := a.db.Exec(`UPDATE collections SET name=?, slug=?, description=?, cover_model_id=NULLIF(?, '') WHERE id=?`, req.Name, slugify(req.Name), req.Description, req.CoverModelID, id); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE collections SET name=?, slug=?, description=?, cover_model_id=NULLIF(?, '') WHERE id=?`, req.Name, slugify(req.Name), req.Description, req.CoverModelID, id); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
@@ -232,7 +232,7 @@ func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer finish()
-	res, err := a.db.Exec(`DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -273,7 +273,7 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := a.db.Exec(`INSERT OR REPLACE INTO collection_models(collection_id, model_id, sort_order) VALUES(?,?,?)`, id, mid, n); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO collection_models(collection_id, model_id, sort_order) VALUES(?,?,?)`, id, mid, n); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -294,13 +294,13 @@ func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request
 	}
 	defer finish()
 	id, modelID := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, id, modelID)
+	res, err := tx.ExecContext(r.Context(), `DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?`, id, modelID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -309,7 +309,7 @@ func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, sql.ErrNoRows)
 		return
 	}
-	if _, err := tx.Exec(`UPDATE collections SET cover_model_id = NULL WHERE id = ? AND cover_model_id = ?`, id, modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `UPDATE collections SET cover_model_id = NULL WHERE id = ? AND cover_model_id = ?`, id, modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -394,14 +394,14 @@ func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, errors.New("modelIds must contain every collection model exactly once"))
 		return
 	}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
 	for order, modelID := range req.ModelIDs {
-		if _, err := tx.Exec(`UPDATE collection_models SET sort_order = ? WHERE collection_id = ? AND model_id = ?`, order, id, modelID); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE collection_models SET sort_order = ? WHERE collection_id = ? AND model_id = ?`, order, id, modelID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -454,7 +454,7 @@ func (a *App) writeCollectionsSidecar() error {
 }
 
 func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`
+	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT s.id,s.token,s.scope,s.target_id,
 			COALESCE(CASE s.scope WHEN 'model' THEN m.title WHEN 'collection' THEN c.name END, s.target_id),
 			COALESCE(s.label,''),COALESCE(s.expires_at,0),COALESCE(s.revoked_at,0),s.hit_count,s.created_at
@@ -519,7 +519,7 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := ShareLink{ID: ids.New(), Token: token, Scope: req.Scope, TargetID: req.TargetID, TargetName: targetName, Label: req.Label, ExpiresAt: req.ExpiresAt, CreatedAt: time.Now().Unix()}
-	if _, err := a.db.Exec(`INSERT INTO share_links(id,token,scope,target_id,label,expires_at,created_at) VALUES(?,?,?,?,?,NULLIF(?,0),?)`, s.ID, s.Token, s.Scope, s.TargetID, s.Label, s.ExpiresAt, s.CreatedAt); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO share_links(id,token,scope,target_id,label,expires_at,created_at) VALUES(?,?,?,?,?,NULLIF(?,0),?)`, s.ID, s.Token, s.Scope, s.TargetID, s.Label, s.ExpiresAt, s.CreatedAt); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -528,7 +528,7 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
-	res, err := a.db.Exec(`UPDATE share_links SET revoked_at = ? WHERE id = ?`, time.Now().Unix(), chi.URLParam(r, "id"))
+	res, err := a.db.ExecContext(r.Context(), `UPDATE share_links SET revoked_at = ? WHERE id = ?`, time.Now().Unix(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -541,19 +541,19 @@ func (a *App) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
-	share, err := a.resolveShare(chi.URLParam(r, "token"))
+	share, err := a.resolveShare(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		publicError(w, err)
 		return
 	}
 	w.Header().Set("X-Robots-Tag", "noindex")
 	if share.Scope == "model" {
-		m, err := a.getModel(share.TargetID)
+		m, err := a.getModelContext(r.Context(), share.TargetID)
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		a.recordShareView(&share)
+		a.recordShareView(r.Context(), &share)
 		writeJSON(w, http.StatusOK, map[string]any{"share": share, "model": m})
 		return
 	}
@@ -573,24 +573,24 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	var model *Model
 	if modelID != "" {
-		if !a.collectionContains(share.TargetID, modelID) {
+		if !a.collectionContains(r.Context(), share.TargetID, modelID) {
 			writeError(w, http.StatusNotFound, errors.New("model not found"))
 			return
 		}
-		selected, err := a.getModel(modelID)
+		selected, err := a.getModelContext(r.Context(), modelID)
 		if err != nil {
 			writeError(w, collectionReadStatus(err), err)
 			return
 		}
 		model = &selected
 	}
-	a.recordShareView(&share)
+	a.recordShareView(r.Context(), &share)
 	writeJSON(w, http.StatusOK, map[string]any{"share": share, "collection": c, "model": model})
 }
 
 func (a *App) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Robots-Tag", "noindex")
-	if _, err := a.resolveShare(chi.URLParam(r, "token")); err != nil {
+	if _, err := a.resolveShare(r.Context(), chi.URLParam(r, "token")); err != nil {
 		publicError(w, err)
 		return
 	}
@@ -606,20 +606,20 @@ func (a *App) handlePublicMesh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachment bool) {
-	share, err := a.resolveShare(chi.URLParam(r, "token"))
+	share, err := a.resolveShare(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		publicError(w, err)
 		return
 	}
 	w.Header().Set("X-Robots-Tag", "noindex")
 	fileID := chi.URLParam(r, "fid")
-	modelID, ok := a.publicFileAllowed(share, fileID)
+	modelID, ok := a.publicFileAllowed(r.Context(), share, fileID)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	var filename, rel string
-	if err := a.db.QueryRow(`SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -638,7 +638,7 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachmen
 }
 
 func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
-	share, err := a.resolveShare(chi.URLParam(r, "token"))
+	share, err := a.resolveShare(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		publicError(w, err)
 		return
@@ -647,12 +647,12 @@ func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
 	modelID := share.TargetID
 	if share.Scope == "collection" {
 		modelID = r.URL.Query().Get("model")
-		if !a.collectionContains(share.TargetID, modelID) {
+		if !a.collectionContains(r.Context(), share.TargetID, modelID) {
 			http.NotFound(w, r)
 			return
 		}
 	}
-	if !a.thumbAllowed(modelID, chi.URLParam(r, "name")) {
+	if !a.thumbAllowed(r.Context(), modelID, chi.URLParam(r, "name")) {
 		http.NotFound(w, r)
 		return
 	}
@@ -665,7 +665,7 @@ func (a *App) handlePublicThumb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublicImage(w http.ResponseWriter, r *http.Request) {
-	share, err := a.resolveShare(chi.URLParam(r, "token"))
+	share, err := a.resolveShare(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		publicError(w, err)
 		return
@@ -673,7 +673,7 @@ func (a *App) handlePublicImage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Robots-Tag", "noindex")
 	imageID := chi.URLParam(r, "imageID")
 	var modelID, rel string
-	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM images WHERE id = ?`, imageID).Scan(&modelID, &rel); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT model_id, rel_path FROM images WHERE id = ?`, imageID).Scan(&modelID, &rel); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -682,7 +682,7 @@ func (a *App) handlePublicImage(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-	} else if !a.collectionContains(share.TargetID, modelID) {
+	} else if !a.collectionContains(r.Context(), share.TargetID, modelID) {
 		http.NotFound(w, r)
 		return
 	}
@@ -696,9 +696,9 @@ func (a *App) handlePublicImage(w http.ResponseWriter, r *http.Request) {
 
 var errShareGone = errors.New("share is expired or revoked")
 
-func (a *App) resolveShare(token string) (ShareLink, error) {
+func (a *App) resolveShare(ctx context.Context, token string) (ShareLink, error) {
 	var s ShareLink
-	err := a.db.QueryRow(`SELECT id,token,scope,target_id,COALESCE(label,''),COALESCE(expires_at,0),COALESCE(revoked_at,0),hit_count,created_at FROM share_links WHERE token = ?`, token).
+	err := a.db.QueryRowContext(ctx, `SELECT id,token,scope,target_id,COALESCE(label,''),COALESCE(expires_at,0),COALESCE(revoked_at,0),hit_count,created_at FROM share_links WHERE token = ?`, token).
 		Scan(&s.ID, &s.Token, &s.Scope, &s.TargetID, &s.Label, &s.ExpiresAt, &s.RevokedAt, &s.HitCount, &s.CreatedAt)
 	if err != nil {
 		return s, err
@@ -710,8 +710,8 @@ func (a *App) resolveShare(token string) (ShareLink, error) {
 	return s, nil
 }
 
-func (a *App) recordShareView(share *ShareLink) {
-	if _, err := a.db.Exec(`UPDATE share_links SET hit_count = hit_count + 1 WHERE id = ?`, share.ID); err == nil {
+func (a *App) recordShareView(ctx context.Context, share *ShareLink) {
+	if _, err := a.db.ExecContext(ctx, `UPDATE share_links SET hit_count = hit_count + 1 WHERE id = ?`, share.ID); err == nil {
 		share.HitCount++
 	}
 }
@@ -731,20 +731,20 @@ func (a *App) shareURL(r *http.Request, token string) string {
 	return base + "/s/" + token
 }
 
-func (a *App) publicFileAllowed(s ShareLink, fileID string) (string, bool) {
+func (a *App) publicFileAllowed(ctx context.Context, s ShareLink, fileID string) (string, bool) {
 	var modelID string
-	if err := a.db.QueryRow(`SELECT model_id FROM files WHERE id = ?`, fileID).Scan(&modelID); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT model_id FROM files WHERE id = ?`, fileID).Scan(&modelID); err != nil {
 		return "", false
 	}
 	if s.Scope == "model" {
 		return modelID, modelID == s.TargetID
 	}
-	return modelID, a.collectionContains(s.TargetID, modelID)
+	return modelID, a.collectionContains(ctx, s.TargetID, modelID)
 }
 
-func (a *App) collectionContains(collectionID, modelID string) bool {
+func (a *App) collectionContains(ctx context.Context, collectionID, modelID string) bool {
 	var n int
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM collection_models WHERE collection_id = ? AND model_id = ?`, collectionID, modelID).Scan(&n)
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM collection_models WHERE collection_id = ? AND model_id = ?`, collectionID, modelID).Scan(&n)
 	return n > 0
 }
 

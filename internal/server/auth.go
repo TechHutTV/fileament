@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
@@ -47,13 +48,17 @@ func (a *App) seedOwnerPassword() error {
 }
 
 func (a *App) ownerExists() (bool, error) {
+	return a.ownerExistsContext(context.Background())
+}
+
+func (a *App) ownerExistsContext(ctx context.Context) (bool, error) {
 	var n int
-	err := a.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key = ?`, ownerHashKey).Scan(&n)
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = ?`, ownerHashKey).Scan(&n)
 	return n > 0, err
 }
 
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
-	owner, err := a.ownerExists()
+	owner, err := a.ownerExistsContext(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -65,7 +70,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
-	owner, err := a.ownerExists()
+	owner, err := a.ownerExistsContext(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -87,7 +92,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.db.Exec(`INSERT INTO settings(key, value) VALUES(?, ?)`, ownerHashKey, hash); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO settings(key, value) VALUES(?, ?)`, ownerHashKey, hash); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -99,12 +104,12 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
 		return
 	}
-	if err := a.pruneExpiredSessions(time.Now()); err != nil {
+	if err := a.pruneExpiredSessions(r.Context(), time.Now()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	var encoded string
-	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusConflict, errors.New("owner setup required"))
 			return
@@ -117,7 +122,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return
 	}
-	session, err := a.createOwnerSession(encoded)
+	session, err := a.createOwnerSession(r.Context(), encoded)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errSessionStateChanged) {
@@ -132,7 +137,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		result, err := a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		result, err := a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token = ?`, c.Value)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -160,7 +165,7 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var encoded string
-	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = ?`, ownerHashKey).Scan(&encoded); err != nil {
 		writeError(w, http.StatusConflict, errors.New("owner setup required"))
 		return
 	}
@@ -179,7 +184,7 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errSessionStateChanged)
 		return
 	}
-	session, err := a.rotateOwnerPassword(encoded, hash, cookie.Value)
+	session, err := a.rotateOwnerPassword(r.Context(), encoded, hash, cookie.Value)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errSessionStateChanged) {
@@ -205,15 +210,15 @@ func (a *App) validSession(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
-	if a.db == nil || a.pruneExpiredSessions(time.Now()) != nil {
+	if a.db == nil || a.pruneExpiredSessions(r.Context(), time.Now()) != nil {
 		return false
 	}
 	var expires int64
-	if err := a.db.QueryRow(`SELECT expires_at FROM sessions WHERE token = ?`, c.Value).Scan(&expires); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT expires_at FROM sessions WHERE token = ?`, c.Value).Scan(&expires); err != nil {
 		return false
 	}
 	if expires <= time.Now().Unix() {
-		_, _ = a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token = ?`, c.Value)
 		return false
 	}
 	return true

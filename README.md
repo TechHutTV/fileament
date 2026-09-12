@@ -153,6 +153,8 @@ Everything required to restore Fileament lives under `/data`:
 ```text
 /data/
   fileament.db
+  fileament.db-wal
+  fileament.db-shm
   collections.json
   tmp/
   backups/
@@ -165,6 +167,8 @@ Everything required to restore Fileament lives under `/data`:
       images/
       thumbs/
 ```
+
+SQLite uses WAL with four connections, immediate write transactions, and full commit synchronization. Place `/data` on a local filesystem that supports SQLite shared-memory locking; WAL is unsuitable for NFS/SMB storage. Keep the database and its `-wal`/`-shm` files together while Fileament is running. Application backups create a consistent standalone database snapshot, and a clean shutdown checkpoints committed WAL data before a filesystem-level backup or restore swap.
 
 Model and collection changes publish in sequence so simultaneous requests preserve each other's changes. Upload parsing and thumbnail rendering run outside that publication lock. Before changing active data, Fileament saves a rollback snapshot and syncs a journal under `/data/.mutations`. Snapshots use hardlinks for unchanged files, with a copy fallback on filesystems that do not support hardlinks. Sidecar and thumbnail replacements use unique temporary files; success is returned after the resulting files, sidecars, and commit marker have been synced.
 

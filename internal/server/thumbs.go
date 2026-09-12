@@ -162,7 +162,7 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 		}
 	}()
 	var modelID, relPath string
-	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -228,11 +228,11 @@ func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relP
 		return false, err
 	}
 	var exists int
-	if err := a.db.QueryRow(`SELECT COUNT(*) FROM files WHERE id = ? AND model_id = ? AND rel_path = ?`, fileID, modelID, relPath).Scan(&exists); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE id = ? AND model_id = ? AND rel_path = ?`, fileID, modelID, relPath).Scan(&exists); err != nil {
 		return false, err
 	}
 	if exists == 0 {
-		_, err := a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+		_, err := a.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, jobID)
 		return false, err
 	}
 	mutation, err := a.beginMutation(modelID)
@@ -247,7 +247,7 @@ func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relP
 	if err := os.Rename(prepared, thumbPath); err != nil {
 		return false, err
 	}
-	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
+	updateRes, err := a.db.ExecContext(ctx, `UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
 	if err != nil {
 		return false, err
 	}
@@ -257,16 +257,16 @@ func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relP
 	}
 	if updated != 1 {
 		_ = os.Remove(thumbPath)
-		_, _ = a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, jobID)
 		return false, nil
 	}
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
 	var primary, largestFileID string
-	if err := a.db.QueryRow(`SELECT COALESCE(primary_thumb, '') FROM models WHERE id = ?`, modelID).Scan(&primary); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(primary_thumb, '') FROM models WHERE id = ?`, modelID).Scan(&primary); err != nil {
 		return false, err
 	}
-	if err := a.db.QueryRow(`SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT id FROM files WHERE model_id = ? ORDER BY size_bytes DESC, sort_order, id LIMIT 1`, modelID).Scan(&largestFileID); err != nil {
 		return false, err
 	}
 	legacyCardPath := filepath.Join(thumbDir, "card.jpg")
@@ -279,7 +279,7 @@ func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relP
 		if err := writePrimaryThumbSource(modelRoot, fileID); err != nil {
 			return false, err
 		}
-		if _, err := a.db.Exec(`UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {
+		if _, err := a.db.ExecContext(ctx, `UPDATE models SET primary_thumb = 'card.png' WHERE id = ?`, modelID); err != nil {
 			return false, err
 		}
 	}
@@ -318,14 +318,14 @@ func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
 	}
 	defer tx.Rollback()
 	var jobID, fileID string
-	err = tx.QueryRow(`SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at, id LIMIT 1`).Scan(&jobID, &fileID)
+	err = tx.QueryRowContext(ctx, `SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at, id LIMIT 1`).Scan(&jobID, &fileID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
-	res, err := tx.Exec(`UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, jobID)
 	if err != nil {
 		return "", "", err
 	}
@@ -493,7 +493,7 @@ func (a *App) publishEvent(evt ThumbnailEvent) {
 func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 	modelID := chi.URLParam(r, "modelID")
 	name := chi.URLParam(r, "name")
-	if !a.thumbAllowed(modelID, name) {
+	if !a.thumbAllowed(r.Context(), modelID, name) {
 		http.NotFound(w, r)
 		return
 	}
@@ -505,16 +505,16 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-func (a *App) thumbAllowed(modelID, name string) bool {
+func (a *App) thumbAllowed(ctx context.Context, modelID, name string) bool {
 	if name == "" || name != filepath.Base(name) {
 		return false
 	}
 	var n int
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM models WHERE id = ? AND primary_thumb = ?`, modelID, name).Scan(&n)
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM models WHERE id = ? AND primary_thumb = ?`, modelID, name).Scan(&n)
 	if n > 0 {
 		return true
 	}
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM files WHERE model_id = ? AND thumb_path = ?`, modelID, filepath.ToSlash(filepath.Join("thumbs", name))).Scan(&n)
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE model_id = ? AND thumb_path = ?`, modelID, filepath.ToSlash(filepath.Join("thumbs", name))).Scan(&n)
 	return n > 0
 }
 
