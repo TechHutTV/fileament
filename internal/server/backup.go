@@ -1,25 +1,24 @@
 package server
 
 import (
-	"archive/zip"
-	"encoding/json"
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/TechHutTV/fileament/internal/ids"
 	"github.com/go-chi/chi/v5"
 )
 
 const (
 	backupFormatVersion = 1
 	dataFormatVersion   = 1
+	backupDownloadTTL   = 15 * time.Minute
+	backupExportTimeout = 30 * time.Minute
 )
 
 type backupManifest struct {
@@ -32,15 +31,48 @@ type backupManifest struct {
 	Collections         int    `json:"collections"`
 }
 
+type preparedBackup struct {
+	DownloadURL string `json:"downloadUrl"`
+	ExpiresAt   int64  `json:"expiresAt"`
+	Filename    string `json:"filename"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	path        string
+	token       string
+	session     [32]byte
+}
+
 func (a *App) mountBackupRoutes(r chi.Router) {
 	r.With(a.requireDataAuth).Post("/api/backups", a.handleCreateBackup)
+	r.With(a.requireDataAuth).Post("/api/backups/prepare", a.handlePrepareBackup)
+	r.With(a.requireDataAuth).Get("/api/backups/download/{token}", a.handleDownloadBackup)
 	r.With(a.requireDataAuth).Post("/api/backups/inspect", a.handleInspectBackup)
 	r.With(a.requireDataAuth, requireJSON).Post("/api/backups/restore", a.handleApplyRestore)
 }
 
 func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
+	a.exportBackup(w, r, false)
+}
+
+func (a *App) handlePrepareBackup(w http.ResponseWriter, r *http.Request) {
+	a.exportBackup(w, r, true)
+}
+
+func (a *App) exportBackup(w http.ResponseWriter, r *http.Request, prepare bool) {
+	if !a.backupMu.TryLock() {
+		writeError(w, http.StatusConflict, errors.New("a backup export or download is already active"))
+		return
+	}
+	defer a.backupMu.Unlock()
+	ctx, cancel := context.WithTimeout(r.Context(), backupExportTimeout)
+	defer cancel()
+	stop := context.AfterFunc(a.backupCtx, cancel)
+	defer stop()
+	if err := a.clearPreparedBackup(); err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("previous backup could not be removed"))
+		return
+	}
 	a.dataMu.Lock()
-	if a.maintenance.Load() {
+	if a.maintenance.Load() || a.backupCtx.Err() != nil {
 		a.dataMu.Unlock()
 		writeError(w, http.StatusServiceUnavailable, errMutationRecoveryRequired)
 		return
@@ -50,185 +82,123 @@ func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 		return
 	}
-	path, manifest, err := a.createBackupArchive(filepath.Join(a.cfg.DataDir, "tmp", "backups"))
+	snapshot, err := a.captureBackupSnapshot(ctx)
 	a.dataMu.Unlock()
+	if snapshot != nil {
+		defer os.RemoveAll(snapshot.root)
+	}
+	if err == nil && a.backupFault != nil {
+		err = a.backupFault("snapshot")
+	}
+	var path string
+	if err == nil {
+		path, err = a.archiveBackupSnapshot(ctx, snapshot, filepath.Join(a.cfg.DataDir, "tmp", "backups"))
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer os.Remove(path)
-
-	file, err := os.Open(path)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer file.Close()
-	stat, err := file.Stat()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	filename := "fileament-backup-" + strings.NewReplacer(":", "", "-", "").Replace(manifest.CreatedAt) + ".fileament"
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	http.ServeContent(w, r, filename, stat.ModTime(), file)
-}
-
-func (a *App) createBackupArchive(dir string) (string, backupManifest, error) {
-	var manifest backupManifest
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", manifest, err
-	}
-	id := ids.New()
-	snapshotPath := filepath.Join(dir, id+".db")
-	archivePath := filepath.Join(dir, id+".fileament")
-	defer os.Remove(snapshotPath)
-
-	if _, err := a.db.Exec(`VACUUM INTO '` + strings.ReplaceAll(filepath.ToSlash(snapshotPath), "'", "''") + `'`); err != nil {
-		return "", manifest, err
-	}
-	snapshot, err := openSQLite(snapshotPath, nil)
-	if err != nil {
-		return "", manifest, err
-	}
-	if _, err := snapshot.Exec(`DELETE FROM sessions`); err != nil {
-		_ = snapshot.Close()
-		return "", manifest, err
-	}
-	if _, err := snapshot.Exec(`UPDATE jobs SET status = 'pending', error = NULL WHERE status = 'running'`); err != nil {
-		_ = snapshot.Close()
-		return "", manifest, err
-	}
-	if err := snapshot.Close(); err != nil {
-		return "", manifest, err
-	}
-
-	manifest = backupManifest{
-		BackupFormatVersion: backupFormatVersion,
-		DataFormatVersion:   dataFormatVersion,
-		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := a.db.QueryRow(`PRAGMA user_version`).Scan(&manifest.DatabaseVersion); err != nil {
-		return "", manifest, err
-	}
-	for query, target := range map[string]*int{
-		`SELECT COUNT(*) FROM models`:      &manifest.Models,
-		`SELECT COUNT(*) FROM files`:       &manifest.Files,
-		`SELECT COUNT(*) FROM collections`: &manifest.Collections,
-	} {
-		if err := a.db.QueryRow(query).Scan(target); err != nil {
-			return "", manifest, err
+		status := http.StatusInternalServerError
+		message := errors.New("backup could not be created; check available storage and retry")
+		if errors.Is(err, errBackupTooLarge) {
+			status, message = http.StatusRequestEntityTooLarge, errBackupTooLarge
 		}
+		writeError(w, status, message)
+		return
 	}
-
-	archive, err := os.OpenFile(archivePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", manifest, err
-	}
-	zw := zip.NewWriter(archive)
-	failed := true
+	keep := false
 	defer func() {
-		if failed {
-			_ = os.Remove(archivePath)
+		if !keep {
+			_ = os.Remove(path)
 		}
 	}()
-	manifestEntry, err := zw.CreateHeader(&zip.FileHeader{Name: "manifest.json", Method: zip.Deflate})
-	if err == nil {
-		err = json.NewEncoder(manifestEntry).Encode(manifest)
+	if err := os.RemoveAll(snapshot.root); err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("backup workspace could not be removed"))
+		return
 	}
-	if err == nil {
-		err = addFileToBackup(zw, snapshotPath, "data/fileament.db")
+	filename := "fileament-backup-" + strings.NewReplacer(":", "", "-", "").Replace(snapshot.manifest.CreatedAt) + ".fileament"
+	if !prepare {
+		a.serveBackupFile(w, r, path, filename)
+		return
 	}
-	if err == nil {
-		err = addPersistentDataToBackup(zw, a.cfg.DataDir)
-	}
-	if closeErr := zw.Close(); err == nil {
-		err = closeErr
-	}
-	if closeErr := archive.Close(); err == nil {
-		err = closeErr
-	}
+	token, err := randomToken(24)
 	if err != nil {
-		return "", manifest, err
+		writeError(w, http.StatusInternalServerError, errors.New("backup download could not be prepared"))
+		return
 	}
-	failed = false
-	return archivePath, manifest, nil
+	info, err := os.Stat(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("backup download is unavailable"))
+		return
+	}
+	cookie, _ := r.Cookie(sessionCookieName)
+	ready := &preparedBackup{DownloadURL: "/api/backups/download/" + token, ExpiresAt: time.Now().Add(backupDownloadTTL).Unix(), Filename: filename, SizeBytes: info.Size(), path: path, token: token, session: sha256.Sum256([]byte(cookie.Value))}
+	a.preparedBackup = ready
+	a.backupTimer = time.AfterFunc(backupDownloadTTL, func() {
+		a.backupMu.Lock()
+		defer a.backupMu.Unlock()
+		if a.preparedBackup == ready {
+			_ = a.clearPreparedBackup()
+		}
+	})
+	keep = true
+	writeJSON(w, http.StatusCreated, ready)
 }
 
-func addPersistentDataToBackup(zw *zip.Writer, root string) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
+func (a *App) handleDownloadBackup(w http.ResponseWriter, r *http.Request) {
+	if !a.backupMu.TryLock() {
+		writeError(w, http.StatusConflict, errors.New("a backup export or download is already active"))
+		return
+	}
+	defer a.backupMu.Unlock()
+	ready := a.preparedBackup
+	cookie, _ := r.Cookie(sessionCookieName)
+	if ready == nil || time.Now().Unix() >= ready.ExpiresAt || ready.token != chi.URLParam(r, "token") || ready.session != sha256.Sum256([]byte(cookie.Value)) {
+		writeError(w, http.StatusNotFound, errors.New("backup download is missing or expired; create a new backup"))
+		return
+	}
+	a.serveBackupFile(w, r, ready.path, ready.Filename)
+}
+
+// backupMu protects prepared archives through the entire download.
+func (a *App) clearPreparedBackup() error {
+	if a.backupTimer != nil {
+		a.backupTimer.Stop()
+	}
+	if a.preparedBackup == nil {
+		return nil
+	}
+	if err := os.Remove(a.preparedBackup.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	excluded := map[string]bool{
-		"fileament.db":         true,
-		"fileament.db-journal": true,
-		"fileament.db-shm":     true,
-		"fileament.db-wal":     true,
-		"tmp":                  true,
-		"backups":              true,
-		".restore":             true,
-		".mutations":           true,
-	}
-	for _, entry := range entries {
-		if excluded[entry.Name()] {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		err := filepath.WalkDir(path, func(current string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return errors.New("backup does not support symbolic links")
-			}
-			rel, err := filepath.Rel(root, current)
-			if err != nil {
-				return err
-			}
-			name := "data/" + filepath.ToSlash(rel)
-			if d.IsDir() {
-				_, err = zw.CreateHeader(&zip.FileHeader{Name: strings.TrimSuffix(name, "/") + "/", Method: zip.Store})
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return errors.New("backup contains an unsupported file type")
-			}
-			return addFileToBackup(zw, current, name)
-		})
-		if err != nil {
-			return err
-		}
-	}
+	a.preparedBackup = nil
 	return nil
 }
 
-func addFileToBackup(zw *zip.Writer, path, name string) error {
+func (a *App) serveBackupFile(w http.ResponseWriter, r *http.Request, path, filename string) {
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		writeError(w, http.StatusInternalServerError, errors.New("backup download is unavailable"))
+		return
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return err
+		writeError(w, http.StatusInternalServerError, errors.New("backup download is unavailable"))
+		return
 	}
-	header, err := zip.FileInfoHeader(info)
-	if err != nil {
-		return err
-	}
-	header.Name = filepath.ToSlash(name)
-	header.Method = zip.Deflate
-	entry, err := zw.CreateHeader(header)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(entry, file)
-	return err
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Now().Add(backupExportTimeout))
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(a.backupCtx, func() {
+		_ = controller.SetWriteDeadline(time.Now())
+		close(interrupted)
+	})
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+		_ = controller.SetWriteDeadline(time.Time{})
+	}()
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	http.ServeContent(w, r, filename, info.ModTime(), file)
 }

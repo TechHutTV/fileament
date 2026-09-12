@@ -108,3 +108,32 @@ The renderer remains unchanged. A separate 512-pixel, 20,000-triangle curved-gri
 GOTOOLCHAIN=go1.26.8 go test ./internal/render -run '^$' -bench BenchmarkThumbnailGrid -benchtime=3s -cpuprofile=/tmp/fileament-render.prof -o /tmp/fileament-render.test
 GOTOOLCHAIN=go1.26.8 go tool pprof -top /tmp/fileament-render.test /tmp/fileament-render.prof
 ```
+
+## Backup exports
+
+Run a small backup benchmark, or opt into a 2 GiB disk fixture:
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test ./internal/server -run '^$' -bench '^BenchmarkBackupSnapshot$' -benchtime=1x -benchmem
+FILEAMENT_BENCH_LARGE_BACKUP=1 GOTOOLCHAIN=go1.26.8 go test ./internal/server -run '^$' -bench '^BenchmarkBackupSnapshot$' -benchtime=1x -benchmem
+GOTOOLCHAIN=go1.26.8 go test ./internal/server -run '^$' -bench '^BenchmarkBackupCompression$' -benchtime=3x
+```
+
+The large fixture writes 1,024 files of 2 MiB each beneath the model tree. A deterministic random block makes their contents difficult to compress; these are opaque backup payloads, not mesh-ingestion fixtures. The fixture uses an otherwise empty SQLite catalog. The large run needs roughly 4 GiB of free space and removes its data afterward.
+
+A single warm local run on Apple M5, macOS/APFS, Go 1.26.8, compared the previous export at `6193eed` with snapshot capture followed by unlocked compression:
+
+| Measurement | Previous export | Snapshot export |
+| --- | --- | --- |
+| Library lock held | 17.423 s | 0.212 s |
+| Complete export, excluding network transfer | 17.443 s | 17.790 s |
+| Archive size | 2,148,339,539 B | 2,148,339,591 B |
+| Total Go allocations | 36.3 MB | 38.4 MB |
+
+The measured additional allocated disk space at the snapshot export's peak was 2,164,498,432 B. Hardlinks reused the original payload blocks; the archive accounted for almost all new space. The snapshot also needs SQLite and directory metadata. File deletion while compression is running keeps the old blocks alive until snapshot cleanup. A filesystem without hardlinks copies those payloads, increasing both lock time and temporary disk use.
+
+These measurements isolate export work without simultaneous clients or thumbnail renders. Capture still waits for existing data operations, scans persistent entries, snapshots SQLite, and copies files that cannot be hardlinked. Larger databases, slow disks, external mounts, and many small files can increase the pause. The allocation figures are cumulative allocations, not peak process RSS.
+
+For a 16 MiB incompressible buffer, ZIP Deflate took 144.2 ms and ZIP Store took 1.50 ms (three iterations, excluding disk and network). Exports therefore store already-compressed 3MF, PNG, JPEG, WebP, GIF, AVIF, ZIP, and gzip files without another compression pass; text meshes, metadata, and SQLite remain compressed. Actual size savings depend on the input.
+
+The settings page prepares a backup through a small JSON response and offers an authenticated normal download link. Archive bytes are no longer fetched into a JavaScript Blob. Backend tests cover a catalog deletion during compression with subsequent restore validation, session-bound downloads, byte ranges, expiry, replacement, cancellation, archive limits, symlink rejection, cleanup, and safety-backup retention. Frontend tests cover preparation, failure/retry, link delivery, expiry, and storage categories. Browser download-manager memory and network throughput were not benchmarked.
