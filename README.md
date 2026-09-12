@@ -84,7 +84,7 @@ All configuration is optional and provided through environment variables.
 | --- | --- | --- |
 | `FILEAMENT_DATA_DIR` | `/data` | Persistent storage root for the database, models, images, thumbnails, and sidecars. |
 | `FILEAMENT_PORT` | `8080` | HTTP port inside the container. |
-| `FILEAMENT_OWNER_PASSWORD` | unset | Seeds the owner password on first boot. Ignored after an owner password exists. |
+| `FILEAMENT_OWNER_PASSWORD` | unset | Seeds the owner password on first boot using the same policy as setup. Ignored after an owner password exists. |
 | `FILEAMENT_MAX_UPLOAD_MB` | `2048` | Maximum upload request size and maximum expanded ZIP size in MiB. |
 | `FILEAMENT_MAX_BACKUP_MB` | `8192` | Maximum uploaded backup size and maximum expanded backup size in MiB. |
 | `FILEAMENT_THUMB_WORKERS` | `2` | Number of background thumbnail workers. |
@@ -103,6 +103,8 @@ environment:
 `FILEAMENT_WEB_DIR` is only used by untagged development builds. Official production images embed the web interface and do not need a separate static directory.
 
 Authentication endpoints require JSON, limit request bodies to 16 KiB and passwords to 1024 bytes, and allow five seconds to receive the body. At most two authentication requests run concurrently. A shared installation-wide limit allows an initial burst of 10 attempts and replenishes one attempt every six seconds; excess attempts return HTTP `429` with `Retry-After`. Forwarded IP headers do not bypass this limit. Idle HTTP connections close after 60 seconds; active uploads, downloads, and event streams are unaffected by that idle timeout.
+
+New owner passwords must contain at least 12 characters, counted as Unicode code points, and at most 1024 UTF-8 bytes. This applies to setup, password changes, and the first-boot environment seed. Invalid first-boot seeds stop startup with a diagnostic that does not include the password.
 
 ## Using Fileament
 

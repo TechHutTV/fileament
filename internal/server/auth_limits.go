@@ -110,14 +110,19 @@ func decodeAuthJSON(w http.ResponseWriter, r *http.Request, value any) bool {
 	return false
 }
 
-func authPasswordSizeAllowed(w http.ResponseWriter, passwords ...string) bool {
-	for _, password := range passwords {
-		if len(password) > maxPasswordBytes {
-			writeError(w, http.StatusBadRequest, errors.New("password must not exceed 1024 bytes"))
-			return false
-		}
+func authPasswordSizeAllowed(w http.ResponseWriter, password string) bool {
+	if err := validatePasswordSize(password); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
 	}
 	return true
+}
+
+func validatePasswordSize(password string) error {
+	if len(password) > maxPasswordBytes {
+		return errors.New("password must not exceed 1024 bytes")
+	}
+	return nil
 }
 
 func writeAuthInputError(w http.ResponseWriter, r *http.Request, status int, err error) {

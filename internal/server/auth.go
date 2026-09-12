@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -33,6 +34,9 @@ func (a *App) seedOwnerPassword() error {
 	exists, err := a.ownerExists()
 	if err != nil || exists || a.cfg.OwnerPassword == "" {
 		return err
+	}
+	if err := validateNewPassword(a.cfg.OwnerPassword); err != nil {
+		return fmt.Errorf("invalid FILEAMENT_OWNER_PASSWORD: %w", err)
 	}
 	hash, err := hashPassword(a.cfg.OwnerPassword)
 	if err != nil {
@@ -71,11 +75,11 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req passwordRequest
-	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
+	if !decodeAuthJSON(w, r, &req) {
 		return
 	}
-	if len(req.Password) < 12 {
-		writeError(w, http.StatusBadRequest, errors.New("password must be at least 12 characters"))
+	if err := validateNewPassword(req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	hash, err := hashPassword(req.Password)
@@ -141,11 +145,11 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	var req changePasswordRequest
-	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.CurrentPassword, req.NewPassword) {
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.CurrentPassword) {
 		return
 	}
-	if len(req.NewPassword) < 12 {
-		writeError(w, http.StatusBadRequest, errors.New("password must be at least 12 characters"))
+	if err := validateNewPassword(req.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	var encoded string
@@ -215,6 +219,16 @@ func (a *App) requireDataAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validateNewPassword(password string) error {
+	if err := validatePasswordSize(password); err != nil {
+		return err
+	}
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 12 {
+		return errors.New("password must be at least 12 Unicode characters")
+	}
+	return nil
 }
 
 func hashPassword(password string) (string, error) {
