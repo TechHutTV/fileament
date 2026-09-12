@@ -9,6 +9,7 @@ extend({ Group: THREE.Group });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 test('real scene fitting and camera movement settle back to zero scheduled frames', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.useFakeTimers();
   const canvas = document.createElement('canvas');
   const render = vi.fn();

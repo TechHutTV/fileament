@@ -66,7 +66,7 @@ test('shows loading progress before fitting the downloaded geometry', async () =
   expect(screen.getByRole('button', { name: 'Reset view' })).toBeDisabled();
   finish();
   expect(await screen.findByTestId('bounds')).toBeInTheDocument();
-  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
 });
 
 test('offers click controls for zooming and resetting the fitted view', async () => {
