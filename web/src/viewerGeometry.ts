@@ -1,7 +1,6 @@
 import type { BufferGeometry } from 'three';
 
-export function prepareSTLGeometry(source: BufferGeometry) {
-  const geometry = source.clone();
+export function prepareSTLGeometry(geometry: BufferGeometry) {
   geometry.computeVertexNormals();
   return geometry;
 }

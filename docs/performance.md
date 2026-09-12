@@ -137,3 +137,35 @@ These measurements isolate export work without simultaneous clients or thumbnail
 For a 16 MiB incompressible buffer, ZIP Deflate took 144.2 ms and ZIP Store took 1.50 ms (three iterations, excluding disk and network). Exports therefore store already-compressed 3MF, PNG, JPEG, WebP, GIF, AVIF, ZIP, and gzip files without another compression pass; text meshes, metadata, and SQLite remain compressed. Actual size savings depend on the input.
 
 The settings page prepares a backup through a small JSON response and offers an authenticated normal download link. Archive bytes are no longer fetched into a JavaScript Blob. Backend tests cover a catalog deletion during compression with subsequent restore validation, session-bound downloads, byte ranges, expiry, replacement, cancellation, archive limits, symlink rejection, cleanup, and safety-backup retention. Frontend tests cover preparation, failure/retry, link delivery, expiry, and storage categories. Browser download-manager memory and network throughput were not benchmarked.
+
+## Viewer rendering and resources
+
+The viewer uses demand rendering. Drei controls request frames as the camera changes, as described in the [React Three Fiber performance guide](https://raw.githubusercontent.com/pmndrs/react-three-fiber/master/docs/advanced/scaling-performance.mdx). A headless integration test uses the installed React Three Fiber scheduler, Drei Bounds, and OrbitControls with a draw counter in place of the graphics driver. It verifies fitting, zoom, damped rotation, reset, and no additional draws during one-second idle windows after each movement settles. It also verifies that a replaced model detaches from the scene before its geometry is disposed. This tests frame scheduling and camera behavior, not GPU utilization or end-to-end frame time.
+
+Each viewer owns its parsed object instead of retaining all variants in the global loader cache. STL normals are repaired in the owned geometry without copying its attributes. OBJ meshes use the selected material color, while 3MF materials and textures remain intact. Cleanup disposes each unique geometry, material, and texture once, including resources shared within a single 3MF object. Separate viewers parse separate objects, so closing one cannot dispose another viewer's resources.
+
+Run CPU and retained-buffer benchmarks from web/:
+
+~~~sh
+npx vitest bench --run src/viewerResources.bench.ts
+npx esbuild benchmarks/viewer-memory.mjs --bundle --platform=node --format=esm --outfile=/tmp/fileament-viewer-memory.mjs
+node --expose-gc /tmp/fileament-viewer-memory.mjs
+~~~
+
+Local results on Apple M5/macOS, Node 22.23.1, Vitest 4.1.11, and the locked Three.js dependencies:
+
+| Geometry preparation | Previous clone and normal repair | Repair owned geometry |
+| --- | --- | --- |
+| 100,000 triangles | 3.23 ms | 2.90 ms |
+| 1,000,000 triangles | 46.23 ms | 40.70 ms |
+
+These are means from ten iterations after two warmups on a synthetic STL-like geometry. The separate edge-generation pass took 280 ms on a 100,001-triangle fixture (three iterations, one warmup). The viewer omits that pass and shadow rendering above 100,000 triangles. Smaller meshes retain their edge outlines and shadows.
+
+The memory fixture switches through twenty distinct 100,000-triangle variants and forces garbage collection before measuring Node's retained ArrayBuffer bytes. It compares the previous source-cache-plus-active-copy strategy with the current asset preparation and disposal functions:
+
+| Strategy | Retained geometry buffers after twenty variants | After releasing all references |
+| --- | --- | --- |
+| Previous cache and active copy | 151,200,000 B | 0 B |
+| Owned active asset | 7,200,000 B | 0 B |
+
+The previous strategy's teardown explicitly clears the simulated cache; ordinary variant navigation previously kept those source buffers. These numbers exclude temporary download buffers, textures, other JavaScript heap objects, graphics-driver allocations, and peak RSS. They are not a whole-browser memory cap. Actual graphics performance and visual output still need a connected browser; none was available for local profiling. Existing import budgets and the 50 MiB/250,000-triangle automatic-viewer gates remain unchanged.
