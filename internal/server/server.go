@@ -34,6 +34,7 @@ type App struct {
 	eventsMu            sync.Mutex
 	events              map[chan ThumbnailEvent]struct{}
 	eventsReset         chan struct{}
+	authLimits          authenticationLimiter
 }
 
 func New(cfg config.Config, webFS fs.FS) (*App, error) {
@@ -76,6 +77,7 @@ func (a *App) Close() error {
 func (a *App) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(a.maintenanceMiddleware)
+	r.Use(a.authenticationLimitsMiddleware)
 	r.Use(a.dataAccessMiddleware)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if a.maintenance.Load() {

@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -72,8 +71,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req passwordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
 		return
 	}
 	if len(req.Password) < 12 {
@@ -94,8 +92,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req passwordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
 		return
 	}
 	var encoded string
@@ -144,8 +141,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	var req changePasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.CurrentPassword, req.NewPassword) {
 		return
 	}
 	if len(req.NewPassword) < 12 {

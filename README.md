@@ -102,6 +102,8 @@ environment:
 
 `FILEAMENT_WEB_DIR` is only used by untagged development builds. Official production images embed the web interface and do not need a separate static directory.
 
+Authentication endpoints require JSON, limit request bodies to 16 KiB and passwords to 1024 bytes, and allow five seconds to receive the body. At most two authentication requests run concurrently. A shared installation-wide limit allows an initial burst of 10 attempts and replenishes one attempt every six seconds; excess attempts return HTTP `429` with `Retry-After`. Forwarded IP headers do not bypass this limit. Idle HTTP connections close after 60 seconds; active uploads, downloads, and event streams are unaffected by that idle timeout.
+
 ## Using Fileament
 
 ### Upload models
