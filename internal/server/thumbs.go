@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,8 @@ type ThumbnailEvent struct {
 	ThumbPath string `json:"thumbPath"`
 }
 
+var thumbnailSlots = make(chan struct{}, 2)
+
 func (a *App) startWorkers() {
 	if a.cfg.ThumbWorkers <= 0 {
 		return
@@ -39,6 +42,8 @@ func (a *App) startWorkers() {
 	if a.stop == nil {
 		a.stop = make(chan struct{})
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.workerCancel = cancel
 	for i := 0; i < a.cfg.ThumbWorkers; i++ {
 		a.workerWG.Add(1)
 		go func() {
@@ -50,7 +55,7 @@ func (a *App) startWorkers() {
 				case <-a.stop:
 					return
 				case <-tick.C:
-					_ = a.processNextThumbnail()
+					_ = a.processNextThumbnailContext(ctx)
 				}
 			}
 		}()
@@ -62,6 +67,10 @@ func (a *App) stopWorkers() {
 		return
 	}
 	close(a.stop)
+	if a.workerCancel != nil {
+		a.workerCancel()
+		a.workerCancel = nil
+	}
 	a.workerWG.Wait()
 	a.stop = nil
 }
@@ -120,10 +129,25 @@ func (a *App) mountThumbRoutes(r chi.Router) {
 	r.With(a.requireAuth).Get("/thumbs/{modelID}/{name}", a.handleThumb)
 }
 
-func (a *App) processNextThumbnail() (err error) {
+func (a *App) processNextThumbnail() error {
+	return a.processNextThumbnailContext(context.Background())
+}
+
+func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case thumbnailSlots <- struct{}{}:
+		defer func() { <-thumbnailSlots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	a.dataMu.RLock()
 	defer a.dataMu.RUnlock()
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -153,7 +177,11 @@ func (a *App) processNextThumbnail() (err error) {
 	claimed := true
 	defer func() {
 		if claimed && err != nil {
-			_, _ = a.db.Exec(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, err.Error(), jobID)
+			status := "failed"
+			if errors.Is(err, context.Canceled) {
+				status = "pending"
+			}
+			_, _ = a.db.Exec(`UPDATE jobs SET status = ?, error = ? WHERE id = ?`, status, err.Error(), jobID)
 		}
 	}()
 	var modelID, relPath string
@@ -180,7 +208,7 @@ func (a *App) processNextThumbnail() (err error) {
 	if err != nil {
 		return err
 	}
-	_, tris, err := mesh.ParseFile(meshPath)
+	_, tris, err := mesh.ParseFileContext(ctx, meshPath)
 	if err != nil {
 		return err
 	}
@@ -188,7 +216,7 @@ func (a *App) processNextThumbnail() (err error) {
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
 		return err
 	}
-	if err := render.RenderPNG(tris, thumbPath, 512); err != nil {
+	if err := render.RenderPNGContext(ctx, tris, thumbPath, 512); err != nil {
 		return err
 	}
 	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)

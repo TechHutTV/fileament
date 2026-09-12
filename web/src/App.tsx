@@ -6,6 +6,7 @@ import { getModelColor, saveModelColor } from './viewerPreferences';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
+const VIEWER_TRIANGLE_LIMIT = 250_000;
 const UPLOAD_CONCURRENCY = 3;
 const NAVIGATION_EVENT = 'fileament:navigate';
 const client = new QueryClient();
@@ -31,6 +32,11 @@ export type ModelFile = {
   bboxZ: number;
   thumbPath?: string;
 };
+
+function canAutoLoadViewer(file: ModelFile | undefined): boolean {
+  return !!file && Number.isFinite(file.sizeBytes) && file.sizeBytes > 0 && file.sizeBytes <= VIEWER_LIMIT
+    && Number.isSafeInteger(file.triangleCount) && file.triangleCount > 0 && file.triangleCount <= VIEWER_TRIANGLE_LIMIT;
+}
 
 export type ModelImage = { id: string; modelId: string; relPath: string; sortOrder: number };
 export type Model = {
@@ -95,7 +101,7 @@ function OwnerApp({ path }: { path: string }) {
           <button type="button" className="icon" onClick={() => setDark(!dark)} title="Toggle dark mode" aria-label="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
         </div>
       </nav>
-      {path.startsWith('/models/') ? <Detail id={path.split('/')[2]} /> : path.startsWith('/collections/') ? <CollectionDetail slug={path.split('/')[2]} /> : path === '/collections' ? <CollectionsPage /> : path === '/upload' ? <UploadPage /> : path === '/settings' ? <SettingsPage /> : <Catalog />}
+      {path.startsWith('/models/') ? <Detail key={path.split('/')[2]} id={path.split('/')[2]} /> : path.startsWith('/collections/') ? <CollectionDetail slug={path.split('/')[2]} /> : path === '/collections' ? <CollectionsPage /> : path === '/upload' ? <UploadPage /> : path === '/settings' ? <SettingsPage /> : <Catalog />}
     </Shell>
   );
 }
@@ -205,7 +211,7 @@ function Detail({ id }: { id: string }) {
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   useEffect(() => { if (model?.files?.[0] && !selectedFileID) setSelectedFileID(model.files[0].id); }, [model, selectedFileID]);
   const file = model?.files.find((f) => f.id === selectedFileID) ?? model?.files?.[0];
-  const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
+  const canAutoLoad = canAutoLoadViewer(file);
   const previewThumb = fileThumbName(file) || model?.primaryThumb;
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['collections'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
   const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
@@ -797,14 +803,14 @@ function PublicPage({ token }: { token: string }) {
   }, [data?.share?.expiresAt]);
   if (isError || unavailable) return <Shell><Empty text="Share not available" /></Shell>;
   const model = data?.model ?? data?.collection?.models?.find((m) => m.id === selected) ?? data?.collection?.models?.[0];
-  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
+  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{data.collection.models?.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}</div>}{model ? <PublicModel key={model.id} model={model} token={token} /> : <Empty text="Loading share" />}</section></Shell>;
 }
 
 function PublicModel({ model, token }: { model: Model; token: string }) {
   const [selectedFileID, setSelectedFileID] = useState(model.files[0]?.id ?? '');
   const [forceViewer, setForceViewer] = useState(false);
   const file = model.files.find((f) => f.id === selectedFileID) ?? model.files[0];
-  const canAutoLoad = !!file && file.sizeBytes <= VIEWER_LIMIT;
+  const canAutoLoad = canAutoLoadViewer(file);
   return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2><Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
 }
 

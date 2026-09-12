@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -211,7 +212,7 @@ func (a *App) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, uploadStatus(err), err)
 		return
 	}
-	model, err := a.ingestStagedUpload(upload)
+	model, err := a.ingestStagedUpload(r.Context(), upload)
 	if err != nil {
 		writeError(w, uploadStatus(err), err)
 		return
@@ -228,7 +229,7 @@ func (a *App) handleCreateGroupedModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, uploadStatus(err), err)
 		return
 	}
-	model, err := a.ingestGroupedStagedUploads(uploads, title)
+	model, err := a.ingestGroupedStagedUploads(r.Context(), uploads, title)
 	if err != nil {
 		writeError(w, uploadStatus(err), err)
 		return
@@ -476,7 +477,7 @@ func (a *App) handleAddModelFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, uploadStatus(err), err)
 		return
 	}
-	m, err := a.appendStagedUpload(modelID, upload, true, true)
+	m, err := a.appendStagedUpload(r.Context(), modelID, upload, true, true)
 	if err != nil {
 		writeError(w, uploadStatus(err), err)
 		return
@@ -587,7 +588,7 @@ func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, uploadStatus(err), err)
 		return
 	}
-	m, err := a.appendStagedUpload(modelID, upload, false, true)
+	m, err := a.appendStagedUpload(r.Context(), modelID, upload, false, true)
 	if err != nil {
 		writeError(w, uploadStatus(err), err)
 		return
@@ -838,7 +839,7 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
-func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
+func (a *App) ingestUpload(ctx context.Context, fh *multipart.FileHeader) (Model, error) {
 	src, err := fh.Open()
 	if err != nil {
 		return Model{}, err
@@ -856,10 +857,10 @@ func (a *App) ingestUpload(fh *multipart.FileHeader) (Model, error) {
 	if err := copyCapped(uploadPath, src, a.cfg.MaxUploadMB<<20); err != nil {
 		return Model{}, errors.Join(errBadUpload, err)
 	}
-	return a.ingestStagedUpload(stagedUpload{Path: uploadPath, Name: filepath.Base(fh.Filename), StageDir: stage})
+	return a.ingestStagedUpload(ctx, stagedUpload{Path: uploadPath, Name: filepath.Base(fh.Filename), StageDir: stage})
 }
 
-func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
+func (a *App) ingestStagedUpload(ctx context.Context, upload stagedUpload) (Model, error) {
 	id := ids.New()
 	now := time.Now().Unix()
 	stage := upload.StageDir
@@ -875,12 +876,12 @@ func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
 	var images []Image
 	var err error
 	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
-		files, images, description, err = a.extractBundle(stage, upload.Path, id)
+		files, images, description, err = a.extractBundle(ctx, stage, upload.Path, id)
 		if err == nil {
 			err = os.Remove(upload.Path)
 		}
 	} else {
-		files, images, err = a.routeOneFile(stage, upload.Path, filepath.Base(upload.Name), id)
+		files, images, err = a.routeOneFile(ctx, stage, upload.Path, filepath.Base(upload.Name), id)
 	}
 	if err != nil {
 		return Model{}, errors.Join(errBadUpload, err)
@@ -901,13 +902,16 @@ func (a *App) ingestStagedUpload(upload stagedUpload) (Model, error) {
 		}
 	}
 	model := Model{ID: id, Title: title, Description: description, TotalBytes: total, CreatedAt: now, UpdatedAt: now, Files: files, Images: images}
+	if err := ctx.Err(); err != nil {
+		return Model{}, err
+	}
 	if err := a.persistStagedModel(stage, model); err != nil {
 		return Model{}, err
 	}
 	return model, nil
 }
 
-func (a *App) ingestGroupedStagedUploads(uploads []stagedUpload, title string) (Model, error) {
+func (a *App) ingestGroupedStagedUploads(ctx context.Context, uploads []stagedUpload, title string) (Model, error) {
 	id := ids.New()
 	stage := uploads[0].StageDir
 	for _, dir := range []string{filepath.Join(stage, "files"), filepath.Join(stage, "images"), filepath.Join(stage, "thumbs")} {
@@ -934,7 +938,7 @@ func (a *App) ingestGroupedStagedUploads(uploads []stagedUpload, title string) (
 		if err := os.Rename(upload.Path, dst); err != nil {
 			return Model{}, err
 		}
-		file, err := a.buildFileRecord(id, dst, filepath.ToSlash(filepath.Join("files", name)), len(files))
+		file, err := a.buildFileRecord(ctx, id, dst, filepath.ToSlash(filepath.Join("files", name)), len(files))
 		if err != nil {
 			return Model{}, errors.Join(errBadUpload, err)
 		}
@@ -946,6 +950,9 @@ func (a *App) ingestGroupedStagedUploads(uploads []stagedUpload, title string) (
 	}
 	now := time.Now().Unix()
 	model := Model{ID: id, Title: title, TotalBytes: total, CreatedAt: now, UpdatedAt: now, Files: files}
+	if err := ctx.Err(); err != nil {
+		return Model{}, err
+	}
 	if err := a.persistStagedModel(stage, model); err != nil {
 		return Model{}, err
 	}
@@ -971,7 +978,7 @@ func (a *App) persistStagedModel(stage string, model Model) error {
 	return nil
 }
 
-func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []Image, string, error) {
+func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID string) ([]ModelFile, []Image, string, error) {
 	zr, err := zip.OpenReader(uploadPath)
 	if err != nil {
 		return nil, nil, "", err
@@ -982,6 +989,9 @@ func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []I
 	var description string
 	var total int64
 	for _, zf := range zr.File {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, "", err
+		}
 		name := filepath.ToSlash(zf.Name)
 		if shouldDiscard(name) || zf.FileInfo().IsDir() {
 			continue
@@ -1002,12 +1012,12 @@ func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []I
 		case "mesh":
 			dstName := uniqueName(filepath.Base(clean), len(files))
 			dst := filepath.Join(stage, "files", dstName)
-			if err := copyCapped(dst, rc, int64(zf.UncompressedSize64)); err != nil {
+			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
 			}
 			_ = rc.Close()
-			mf, err := a.buildFileRecord(modelID, dst, filepath.ToSlash(filepath.Join("files", dstName)), len(files))
+			mf, err := a.buildFileRecord(ctx, modelID, dst, filepath.ToSlash(filepath.Join("files", dstName)), len(files))
 			if err != nil {
 				return nil, nil, "", err
 			}
@@ -1015,7 +1025,7 @@ func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []I
 		case "image":
 			dstName := uniqueName(filepath.Base(clean), len(images))
 			dst := filepath.Join(stage, "images", dstName)
-			if err := copyCapped(dst, rc, int64(zf.UncompressedSize64)); err != nil {
+			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
 			}
@@ -1038,14 +1048,14 @@ func (a *App) extractBundle(stage, uploadPath, modelID string) ([]ModelFile, []I
 	return files, images, description, nil
 }
 
-func (a *App) routeOneFile(stage, srcPath, name, modelID string) ([]ModelFile, []Image, error) {
+func (a *App) routeOneFile(ctx context.Context, stage, srcPath, name, modelID string) ([]ModelFile, []Image, error) {
 	switch classifyExt(name) {
 	case "mesh":
 		dst := filepath.Join(stage, "files", filepath.Base(name))
 		if err := os.Rename(srcPath, dst); err != nil {
 			return nil, nil, err
 		}
-		mf, err := a.buildFileRecord(modelID, dst, filepath.ToSlash(filepath.Join("files", filepath.Base(name))), 0)
+		mf, err := a.buildFileRecord(ctx, modelID, dst, filepath.ToSlash(filepath.Join("files", filepath.Base(name))), 0)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1061,7 +1071,7 @@ func (a *App) routeOneFile(stage, srcPath, name, modelID string) ([]ModelFile, [
 	}
 }
 
-func (a *App) appendStagedUpload(modelID string, upload stagedUpload, allowMeshes, allowImages bool) (Model, error) {
+func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload stagedUpload, allowMeshes, allowImages bool) (Model, error) {
 	if _, err := a.getModel(modelID); err != nil {
 		return Model{}, sql.ErrNoRows
 	}
@@ -1074,9 +1084,9 @@ func (a *App) appendStagedUpload(modelID string, upload stagedUpload, allowMeshe
 	var images []Image
 	var err error
 	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
-		files, images, _, err = a.extractBundle(upload.StageDir, upload.Path, modelID)
+		files, images, _, err = a.extractBundle(ctx, upload.StageDir, upload.Path, modelID)
 	} else {
-		files, images, err = a.routeOneFile(upload.StageDir, upload.Path, filepath.Base(upload.Name), modelID)
+		files, images, err = a.routeOneFile(ctx, upload.StageDir, upload.Path, filepath.Base(upload.Name), modelID)
 	}
 	if err != nil {
 		return Model{}, errors.Join(errBadUpload, err)
@@ -1089,6 +1099,9 @@ func (a *App) appendStagedUpload(modelID string, upload stagedUpload, allowMeshe
 	}
 	if len(files) == 0 && len(images) == 0 {
 		return Model{}, errors.Join(errBadUpload, errors.New("upload contains no accepted files"))
+	}
+	if err := ctx.Err(); err != nil {
+		return Model{}, err
 	}
 	var maxFileOrder, maxImageOrder int
 	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder)
@@ -1158,16 +1171,19 @@ func (a *App) appendStagedUpload(modelID string, upload stagedUpload, allowMeshe
 	return m, nil
 }
 
-func (a *App) buildFileRecord(modelID, absPath, relPath string, order int) (ModelFile, error) {
+func (a *App) buildFileRecord(ctx context.Context, modelID, absPath, relPath string, order int) (ModelFile, error) {
+	if err := ctx.Err(); err != nil {
+		return ModelFile{}, err
+	}
 	st, err := os.Stat(absPath)
 	if err != nil {
 		return ModelFile{}, err
 	}
-	sum, err := shaFile(absPath)
+	sum, err := shaFileContext(ctx, absPath)
 	if err != nil {
 		return ModelFile{}, err
 	}
-	stats, _, err := mesh.ParseFile(absPath)
+	stats, _, err := mesh.ParseFileContext(ctx, absPath)
 	if err != nil {
 		return ModelFile{}, err
 	}
@@ -1411,16 +1427,32 @@ func copyCapped(dst string, src io.Reader, capBytes int64) error {
 }
 
 func shaFile(path string) (string, error) {
+	return shaFileContext(context.Background(), path)
+}
+
+func shaFileContext(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, uploadContextReader{ctx, f}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type uploadContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r uploadContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 
 func classifyExt(name string) string {

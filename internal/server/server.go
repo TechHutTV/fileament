@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ type App struct {
 	restoreMu           sync.Mutex
 	maintenance         atomic.Bool
 	stop                chan struct{}
+	workerCancel        context.CancelFunc
 	workerWG            sync.WaitGroup
 	thumbMu             sync.Mutex
 	eventsMu            sync.Mutex

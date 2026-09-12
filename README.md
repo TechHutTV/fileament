@@ -116,13 +116,19 @@ The upload screen supports loose STL, OBJ, and 3MF files plus ZIP archives. Choo
 
 ZIP processing rejects unsafe paths and common junk files. Uploads are streamed into the persistent data volume instead of being buffered in memory.
 
+Mesh processing has separate limits from the upload request size. Each mesh may occupy at most 512 MiB on disk and produce at most 1,000,000 triangles. OBJ and 3MF inputs may contain at most 2,000,000 vertices; STL and OBJ text lines are limited to 1 MiB. Coordinates and transforms must be finite, and final coordinate magnitudes cannot exceed 10¹² model units (millimeters after 3MF unit conversion).
+
+A 3MF package may contain at most 2,048 ZIP entries and 64 MiB of expanded content, including attachments. ZIP metadata reads have a 4 MiB budget. XML and component nesting are limited to 64 levels, and both resource declarations and expanded component visits have a 100,000-item budget. Package validation checks actual expanded bytes before decoding model parts serially. These limits also apply when thumbnail workers read existing files.
+
+At most two meshes are parsed concurrently, with a 30-second deadline including admission time. Thumbnail jobs have a one-minute deadline including admission, with a separate 30-second render deadline and at most two active jobs regardless of the configured worker count. Upload parsing stops when its request is canceled. Shutdown cancels active thumbnail processing and returns interrupted jobs to pending; invalid or timed-out jobs are marked failed. Rendering preserves an existing thumbnail if the replacement fails.
+
 ### Organize your library
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
 ### Preview and download
 
-Supported meshes can be opened in the browser viewer. Files larger than 50 MB wait for manual confirmation before loading to avoid freezing the browser. Original files remain available for download, and each variation can be renamed inline without changing its file format.
+Supported meshes can be opened in the browser viewer. Files larger than 50 MiB, files with more than 250,000 triangles, and files without valid geometry statistics wait for **Load 3D view** before loading. This applies to owner and public share pages; each variant requires its own confirmation. Original files remain available for download, and each variation can be renamed inline without changing its file format.
 
 Raw mesh endpoints serve original bytes as `application/octet-stream` with content sniffing disabled and a sandbox policy. Model files are never served as HTML; download endpoints retain their attachment filenames.
 
