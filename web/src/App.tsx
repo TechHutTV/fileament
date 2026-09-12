@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, ChevronDown, Copy, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
-import { Suspense, lazy, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
@@ -351,7 +351,7 @@ function UploadPage() {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
   const itemsRef = useRef(items);
-  useEffect(() => { itemsRef.current = items; }, [items]);
+  useLayoutEffect(() => { itemsRef.current = items; }, [items]);
   const [itemToRemove, setItemToRemove] = useState<UploadItem | null>(null);
   const [removingKey, setRemovingKey] = useState('');
   const [removeError, setRemoveError] = useState('');
