@@ -2,7 +2,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/compress-assets.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

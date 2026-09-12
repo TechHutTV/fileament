@@ -169,3 +169,60 @@ The memory fixture switches through twenty distinct 100,000-triangle variants an
 | Owned active asset | 7,200,000 B | 0 B |
 
 The previous strategy's teardown explicitly clears the simulated cache; ordinary variant navigation previously kept those source buffers. These numbers exclude temporary download buffers, textures, other JavaScript heap objects, graphics-driver allocations, and peak RSS. They are not a whole-browser memory cap. Actual graphics performance and visual output still need a connected browser; none was available for local profiling. Existing import budgets and the 50 MiB/250,000-triangle automatic-viewer gates remain unchanged.
+
+## Frontend transfer and thumbnail refreshes
+
+The frontend build writes gzip copies of hash-named JavaScript and CSS beside the original assets. Both representations are embedded in production, so serving gzip needs no request-time compression or growing in-memory asset cache. Encoding selection handles quality values and exclusions, and responses include `Vary: Accept-Encoding` so caches distinguish representations, following the [HTTP negotiation rules](https://www.rfc-editor.org/rfc/rfc9110.html#name-accept-encoding).
+
+An embedded-server test fetched the final build over loopback HTTP with an explicit gzip request, checked its headers and content length, and verified that decompression reproduced the original bytes. These are measured response payloads, rather than Vite's estimated gzip sizes:
+
+| Asset | Original bytes | Gzip bytes received |
+| --- | ---: | ---: |
+| Main JavaScript | 432,684 | 130,944 |
+| Lazy viewer JavaScript | 925,064 | 251,525 |
+| CSS | 35,759 | 6,704 |
+| All three | 1,393,507 | 389,173 |
+
+For this build, gzip reduces the combined payload by 72.1%. The viewer remains lazy: ordinary navigation does not fetch it until a model is opened. These totals exclude HTTP/TLS overhead, HTML, API data, images, and model downloads. They do not measure network latency or browser rendering speed. The existing uncompressed viewer chunk-size warning remains.
+
+The added gzip payload occupies 389,173 bytes alongside the originals in the embedded UI; executable overhead and alignment are separate. Compressing all three files and writing their gzip copies took a mean 22.8 ms over ten sequential runs with warm filesystem caches on Apple M5/macOS and Node 22.23.1 (range 21.6–24.6 ms). This cost occurs during the build. From `web/`, the measurement can be repeated with:
+
+~~~sh
+npm run build
+node --input-type=module <<'JS'
+import { compressAssets } from './scripts/compress-assets.mjs';
+import { performance } from 'node:perf_hooks';
+const samples = [];
+for (let i = 0; i < 10; i++) {
+  const start = performance.now();
+  await compressAssets('dist/assets');
+  samples.push(performance.now() - start);
+}
+console.log({ meanMs: samples.reduce((a, b) => a + b, 0) / samples.length });
+JS
+~~~
+
+To verify the embedded HTTP responses from the repository root after building the frontend, inspect the generated staging cleanup before running it:
+
+~~~sh
+git clean -ndX -- cmd/fileament/dist
+git clean -fdX -- cmd/fileament/dist
+mkdir -p cmd/fileament/dist
+cp -R web/dist/. cmd/fileament/dist/
+go test -tags embedded_ui ./cmd/fileament -run TestEmbeddedUIServesWithoutExternalDirectory -count=1 -v
+~~~
+
+CI also runs the final image with disposable `/data` on tmpfs, a read-only root filesystem, dropped capabilities, a memory/CPU limit, and a loopback-only host port. The smoke test checks health, HTML, negotiated gzip, HEAD, conditional asset responses, and private/share cache policies, then removes its container. With a running Docker engine, run the same check from the repository root:
+
+~~~sh
+docker build -t fileament:ci .
+python3 .github/scripts/smoke_container.py fileament:ci
+~~~
+
+Hashed scripts and styles have a one-year immutable cache lifetime and separate weak validators for identity and gzip. Forced validation can return a bodyless 304. Ordinary HTML remains refreshable with `no-cache`, and share HTML, API responses, and owner/public model assets retain `private, no-store`. Missing static assets return 404 instead of cached HTML. Tests cover GET/HEAD, quality-value negotiation, unsupported encodings, conditional requests, identity byte ranges, full gzip responses to range requests, and operation without a gzip copy.
+
+Thumbnail notifications now enter a fixed 250 ms batch window. A controlled frontend regression sends 100 notifications for one model after the catalog's initial request. The previous implementation at `7c30256` made 100 additional catalog fetch calls; the batched implementation makes one. This is an in-process fetch-count measurement with mocked responses, not a production load or network-throughput benchmark. Repeat it with `npx vitest run src/AppThumbnailRefresh.test.tsx` from `web/`.
+
+The queue retains at most 256 distinct model IDs; overflow requests full reconciliation. Refreshes are serialized, and events received during a request remain queued for another batch. If an affected query was already loading before the event, it is refreshed again after that older request settles. Active model details are targeted by model ID, and collection details by loaded membership; catalog and collection summaries refresh in batches. Server data determines the selected cover, and a regression test verifies that preview updates preserve an unsaved model title.
+
+Catalog/model/collection subscriptions reconcile after reconnects and every minute, including when EventSource is unavailable. Existing pending-model polling remains at 15 seconds. Upload reconciliation checks pending models every 15 seconds and uses at most three concurrent model requests. Completed uploads are fetched again only for a relevant event or an overflow reconciliation. Explicitly queued events survive a simultaneous pending-upload reconciliation. Unmount closes streams, clears timers, aborts upload refreshes, and prevents queued callbacks from starting. Public pages do not subscribe to owner events.

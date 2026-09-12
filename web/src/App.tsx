@@ -4,6 +4,7 @@ import { Suspense, lazy, useEffect, useId, useLayoutEffect, useRef, useState, ty
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
+import { subscribeThumbnailRefresh, useThumbnailQueryRefresh } from './thumbnailRefresh';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
@@ -148,12 +149,12 @@ function AuthScreen({ mode }: { mode: 'setup' | 'login' }) {
 }
 
 function Catalog() {
+  useThumbnailQueryRefresh();
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [collection, setCollection] = useState('');
   const [sort, setSort] = useState('created');
   const debounced = useDebounced(q, 250);
-  const qc = useQueryClient();
   const collections = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const tags = useQuery<{ name: string; slug: string }[]>({ queryKey: ['tags'], queryFn: () => api('/api/tags') });
   const collectionItems = Array.isArray(collections.data) ? collections.data : [];
@@ -172,12 +173,6 @@ function Catalog() {
     getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
   });
   const items = [...new Map((page.data?.pages.flatMap((result) => result.items) ?? []).map((item) => [item.id, item])).values()];
-  useEffect(() => {
-    if (typeof EventSource === 'undefined') return undefined;
-    const es = new EventSource('/api/events');
-    es.addEventListener('thumbnail', () => qc.invalidateQueries({ queryKey: ['models'] }));
-    return () => es.close();
-  }, [qc]);
   const hasFilters = q || tag || collection || sort !== 'created';
   return (
     <section className="content page-content">
@@ -210,6 +205,7 @@ function ModelCard({ model }: { model: ModelSummary }) {
 }
 
 function Detail({ id }: { id: string }) {
+  useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const { data: model, isLoading, isError } = useQuery<Model>({
     queryKey: ['model', id], queryFn: () => api(`/api/models/${id}`),
@@ -553,27 +549,25 @@ function UploadPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const refreshing = new Set<string>();
-    const refresh = (modelID: string) => {
-      if (refreshing.has(modelID) || !itemsRef.current.some((item) => item.model?.id === modelID)) return;
-      refreshing.add(modelID);
-      void api(`/api/models/${modelID}`, { signal: controller.signal }).then((model: Model) => {
+    const refresh = async (modelID: string) => {
+      if (!itemsRef.current.some((item) => item.model?.id === modelID)) return;
+      await api(`/api/models/${modelID}`, { signal: controller.signal }).then((model: Model) => {
         if (controller.signal.aborted) return;
+        qc.setQueriesData({ queryKey: ['model', modelID], exact: true }, model);
         setItems((current) => current.map((item) => item.model?.id === modelID && item.status !== 'removing' ? { ...item, model, status: uploadStatusForModel(model) } : item));
-      }).catch(() => undefined).finally(() => refreshing.delete(modelID));
+      }).catch(() => undefined);
     };
-    const reconcile = () => itemsRef.current.forEach((item) => { if (item.model && (item.status === 'processing' || item.model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running'))) refresh(item.model.id); });
-    const events = typeof EventSource === 'undefined' ? undefined : new EventSource('/api/events');
-    events?.addEventListener('thumbnail', (event) => {
-      try {
-        const modelID: unknown = JSON.parse((event as MessageEvent).data).modelId;
-        if (typeof modelID === 'string') refresh(modelID);
-      } catch { /* Ignore incomplete events; reconciliation refreshes pending work. */ }
-    });
-    events?.addEventListener('open', reconcile);
-    const interval = window.setInterval(reconcile, 15_000);
-    return () => { controller.abort(); window.clearInterval(interval); events?.close(); };
-  }, []);
+    const unsubscribe = subscribeThumbnailRefresh(async (models) => {
+      const queue = [...(models ?? new Set(itemsRef.current.flatMap((item) => item.model ? [item.model.id] : [])))];
+      await Promise.all(Array.from({ length: Math.min(queue.length, UPLOAD_CONCURRENCY) }, async () => {
+        while (queue.length && !controller.signal.aborted) {
+          const id = queue.shift();
+          if (id) await refresh(id);
+        }
+      }));
+    }, 15_000, () => itemsRef.current.flatMap((item) => item.model && (item.status === 'processing' || item.model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running')) ? [item.model.id] : []));
+    return () => { unsubscribe(); controller.abort(); };
+  }, [qc]);
 
   useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
 
@@ -757,16 +751,11 @@ function SettingsPage() {
 }
 
 function CollectionsPage() {
+  useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const [formVersion, setFormVersion] = useState(0);
   const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
   const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { setFormVersion((version) => version + 1); qc.invalidateQueries({ queryKey: ['collections'] }); } });
-  useEffect(() => {
-    if (typeof EventSource === 'undefined') return undefined;
-    const events = new EventSource('/api/events');
-    events.addEventListener('thumbnail', () => qc.invalidateQueries({ queryKey: ['collections'] }));
-    return () => events.close();
-  }, [qc]);
   return <section className="content page-content collections-page">
     <PageHeader eyebrow="Organize your library" title="Collections" description="Group related models into focused sets for projects, printers, or workflows." />
     <section className="surface-card collection-create">
@@ -781,6 +770,7 @@ function CollectionsPage() {
 }
 
 function CollectionDetail({ slug }: { slug: string }) {
+  useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const page = useInfiniteQuery({

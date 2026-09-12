@@ -64,3 +64,6 @@ jobs:
 
       - name: Docker build
         run: docker build -t fileament:ci .
+
+      - name: Production image smoke test
+        run: python3 .github/scripts/smoke_container.py fileament:ci

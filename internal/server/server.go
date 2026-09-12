@@ -120,6 +120,9 @@ func (a *App) Router() http.Handler {
 	a.mountThumbRoutes(r)
 	a.mountBackupRoutes(r)
 	r.Get("/*", a.serveSPA)
+	r.Head("/", a.serveSPA)
+	r.Head("/index.html", a.serveSPA)
+	r.Head("/assets/*", a.serveSPA)
 	return r
 }
 
@@ -222,30 +225,6 @@ func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, usage)
-}
-
-func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	if path == "" {
-		path = "index.html"
-	}
-	if _, err := fs.Stat(a.webFS, path); err != nil {
-		data, readErr := fs.ReadFile(a.webFS, "index.html")
-		if readErr != nil {
-			http.NotFound(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/s/") {
-			w.Header().Set("X-Robots-Tag", "noindex")
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/s/") {
-		w.Header().Set("X-Robots-Tag", "noindex")
-	}
-	http.FileServer(http.FS(a.webFS)).ServeHTTP(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
