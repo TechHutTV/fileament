@@ -202,6 +202,8 @@ Browser mutations must originate from Fileament itself. Go's origin protection r
 
 API responses, owner assets, public shared assets and share pages use `Cache-Control: private, no-store`, including errors and access-status responses. Configure proxies to honor this policy so cached content cannot bypass a later authorization or share-revocation check. Revocation cannot retract a copy someone already downloaded.
 
+Owner and share pages reject framing and send no referrer information on outgoing requests. The content security policy also blocks plugins, foreign base URLs, and cross-origin form targets. It leaves script, style, image, and connection sources unrestricted so the existing viewer and Markdown image behavior remain supported. Raw mesh responses retain their stricter sandbox policy.
+
 Only explicit share links are public. Owner pages and model assets require an authenticated session.
 
 ## Build from source

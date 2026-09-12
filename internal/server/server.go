@@ -80,6 +80,7 @@ func (a *App) Close() error {
 
 func (a *App) Router() http.Handler {
 	r := chi.NewRouter()
+	r.Use(browserSecurityHeaders)
 	r.Use(sensitiveCachePolicy)
 	r.Use(protectBrowserOrigin)
 	r.Use(a.maintenanceMiddleware)
