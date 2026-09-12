@@ -42,6 +42,10 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: Frontend vulnerability scan
+        working-directory: web
+        run: npm audit --audit-level=low
+
       - name: Frontend lint
         working-directory: web
         run: npm run lint

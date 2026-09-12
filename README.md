@@ -221,10 +221,11 @@ docker run -d \
 
 Fileament uses Go 1.26.8 or newer from a supported release line for the backend and React, TypeScript, and Vite for the frontend. See [`AGENTS.md`](AGENTS.md) for the complete architecture, development workflow, security invariants, and verification requirements.
 
-Frontend checks run from `web/`:
+Frontend checks use Node 22.12 or newer and run from `web/`:
 
 ```sh
 npm ci
+npm audit --audit-level=low
 npm test
 npm run lint
 npm run typecheck
