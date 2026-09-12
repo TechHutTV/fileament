@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -144,6 +145,8 @@ WHERE images.model_id = excluded.model_id`, img.ID, m.ID, img.RelPath, img.SortO
 }
 
 func (a *App) recoverThumbnailJobs() error {
-	_, err := a.db.Exec(`UPDATE jobs SET status = 'pending', error = COALESCE(error, 'recovered after interrupted worker') WHERE type = 'thumbnail' AND status = 'running'`)
-	return err
+	if _, err := a.db.Exec(`UPDATE jobs SET status = 'pending', finished_at = NULL, error = COALESCE(error, 'recovered after interrupted worker') WHERE type = 'thumbnail' AND status = 'running'`); err != nil {
+		return err
+	}
+	return a.pruneThumbnailJobs(context.Background(), time.Now())
 }

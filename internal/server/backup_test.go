@@ -98,7 +98,7 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.BackupFormatVersion != 1 || manifest.DataFormatVersion != 1 || manifest.DatabaseVersion != 1 {
+	if manifest.BackupFormatVersion != 1 || manifest.DataFormatVersion != 1 || manifest.DatabaseVersion != schemaVersion {
 		t.Fatalf("unexpected manifest versions: %+v", manifest)
 	}
 	if manifest.Models != 1 || manifest.Files != 1 || manifest.Collections != 1 {

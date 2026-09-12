@@ -158,11 +158,14 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 			if errors.Is(err, context.Canceled) {
 				status = "pending"
 			}
-			_, _ = a.db.Exec(`UPDATE jobs SET status = ?, error = ? WHERE id = ?`, status, err.Error(), jobID)
+			err = errors.Join(err, a.finishThumbnailJob(jobID, status, err.Error()))
 		}
 	}()
 	var modelID, relPath string
 	if err := a.db.QueryRow(`SELECT model_id, rel_path FROM files WHERE id = ?`, fileID).Scan(&modelID, &relPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 	modelRoot, err := modelRootPath(a.cfg.DataDir, modelID)
@@ -173,15 +176,6 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 		return errInvalidPath
 	}
 	meshPath, err := containedPath(modelRoot, relPath)
-	if err != nil {
-		return err
-	}
-	thumbDir := filepath.Join(modelRoot, "thumbs")
-	thumbPath, err := containedName(thumbDir, fileID+".png")
-	if err != nil {
-		return err
-	}
-	legacyFilePath, err := containedName(thumbDir, fileID+".jpg")
 	if err != nil {
 		return err
 	}
@@ -200,6 +194,30 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err := render.RenderPNGContext(ctx, tris, prepared.Name(), 512); err != nil {
 		return err
 	}
+	if err := a.publishThumbnail(ctx, jobID, fileID, modelID, relPath, prepared.Name()); err != nil {
+		return err
+	}
+	claimed = false
+	return nil
+}
+
+func (a *App) publishThumbnail(ctx context.Context, jobID, fileID, modelID, relPath, prepared string) error {
+	if !validStorageID(fileID) || !validAssetPath(relPath, "files") {
+		return errInvalidPath
+	}
+	modelRoot, err := modelRootPath(a.cfg.DataDir, modelID)
+	if err != nil {
+		return err
+	}
+	thumbDir := filepath.Join(modelRoot, "thumbs")
+	thumbPath, err := containedName(thumbDir, fileID+".png")
+	if err != nil {
+		return err
+	}
+	legacyFilePath, err := containedName(thumbDir, fileID+".jpg")
+	if err != nil {
+		return err
+	}
 	a.modelPersistMu.Lock()
 	defer a.modelPersistMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -211,14 +229,13 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	}
 	if exists == 0 {
 		_, err := a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
-		claimed = false
 		return err
 	}
 	thumbRel := filepath.ToSlash(filepath.Join("thumbs", fileID+".png"))
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(prepared.Name(), thumbPath); err != nil {
+	if err := os.Rename(prepared, thumbPath); err != nil {
 		return err
 	}
 	updateRes, err := a.db.Exec(`UPDATE files SET thumb_path = ? WHERE id = ?`, thumbRel, fileID)
@@ -232,7 +249,6 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if updated != 1 {
 		_ = os.Remove(thumbPath)
 		_, _ = a.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
-		claimed = false
 		return nil
 	}
 	a.thumbMu.Lock()
@@ -265,14 +281,13 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err := a.writeSidecar(m); err != nil {
 		return err
 	}
-	if _, err := a.db.Exec(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ?`, jobID); err != nil {
+	if err := a.finishThumbnailJob(jobID, "done", ""); err != nil {
 		return err
 	}
 	_ = os.Remove(legacyFilePath)
 	if migratesLegacyPrimary || primary == "card.png" {
 		_ = os.Remove(legacyCardPath)
 	}
-	claimed = false
 	a.publishEvent(ThumbnailEvent{ModelID: modelID, FileID: fileID, ThumbPath: thumbRel})
 	return nil
 }
@@ -308,6 +323,25 @@ func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
 		return "", "", err
 	}
 	return jobID, fileID, nil
+}
+
+func (a *App) finishThumbnailJob(jobID, status, diagnostic string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var finished any
+	if status == "done" || status == "failed" {
+		finished = time.Now().Unix()
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error = NULLIF(?, ''), finished_at = ? WHERE id = ?`, status, diagnostic, finished, jobID); err != nil {
+		return err
+	}
+	return a.pruneThumbnailJobs(ctx, time.Now())
+}
+
+func (a *App) pruneThumbnailJobs(ctx context.Context, now time.Time) error {
+	_, err := a.db.ExecContext(ctx, `DELETE FROM jobs WHERE status IN ('done','failed') AND
+ (finished_at < ? OR id IN (SELECT id FROM jobs WHERE status IN ('done','failed') ORDER BY finished_at DESC, id DESC LIMIT -1 OFFSET 1000))`, now.Add(-7*24*time.Hour).Unix())
+	return err
 }
 
 func filesHaveEqualContents(left, right string) bool {
