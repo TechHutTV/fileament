@@ -42,13 +42,3 @@ func finite(value float64) bool {
 func validPoint(v Vec3) bool {
 	return finite(v.X) && finite(v.Y) && finite(v.Z) && math.Abs(v.X) <= 1e12 && math.Abs(v.Y) <= 1e12 && math.Abs(v.Z) <= 1e12
 }
-
-func appendTriangle(tris []Triangle, tri Triangle, limit int) ([]Triangle, error) {
-	if len(tris) >= limit {
-		return nil, errMeshLimit
-	}
-	if !validPoint(tri.A) || !validPoint(tri.B) || !validPoint(tri.C) {
-		return nil, errors.New("invalid mesh coordinates")
-	}
-	return append(tris, tri), nil
-}
