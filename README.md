@@ -144,6 +144,8 @@ Deleting the last variant keeps the model's metadata, images, and collection mem
 
 Supported meshes can be opened in the browser viewer. Files larger than 50 MiB, files with more than 250,000 triangles, and files without valid geometry statistics wait for **Load 3D view** before loading. This applies to owner and public share pages; each variant requires its own confirmation. Original files remain available for download, and each variation can be renamed inline without changing its file format.
 
+The viewer renders while fitting the model or moving the camera, then stops drawing when the view settles. Models above 100,000 triangles omit edge outlines and shadows. Switching variants cancels the previous download and releases its geometry, materials, and textures; reopening a variant downloads it again. Model colors and 3MF textures are preserved, and camera controls become available when the model and its textures have finished loading.
+
 Raw mesh endpoints serve original bytes as `application/octet-stream` with content sniffing disabled and a sandbox policy. Model files are never served as HTML; download endpoints retain their attachment filenames.
 
 If a 3D view fails to load, its error stays inside the preview so downloads and navigation remain available. Browser storage is optional: login and theme controls continue working when saved preferences cannot be read or written, with theme changes lasting for the current page session.
