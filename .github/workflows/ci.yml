@@ -2,41 +2,86 @@ name: ci
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  schedule:
+    - cron: '23 8 * * 1'
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      commit:
+        description: Commit that passed all validation gates
+        value: ${{ jobs.validate.outputs.commit }}
+
+permissions:
+  contents: read
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      commit: ${{ steps.revision.outputs.commit }}
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.11"
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          python-version: '3.11'
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Verify generated frontend is not tracked
         run: test -z "$(git ls-files web/dist cmd/fileament/dist internal/server/dist)"
 
-      - name: Release note policy tests
+      - name: Verify Go builder matches validation
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          version = re.search(r'^go (\d+\.\d+\.\d+)$', Path('go.mod').read_text(), re.M).group(1)
+          builder = re.search(r'^FROM --platform=\$BUILDPLATFORM golang:(\S+) AS build$', Path('Dockerfile').read_text(), re.M).group(1)
+          assert re.fullmatch(re.escape(version) + r'-alpine@sha256:[0-9a-f]{64}', builder), 'Go builder and validation versions differ or the image is not pinned'
+          PY
+
+      - name: Workflow validation
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+
+      - name: Release policy tests
         run: python3 -m unittest discover -s .github/scripts -p '*_test.py' -v
 
-      - name: Go test
+      - name: Go test and vet
         run: |
-          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/")'
+          go test ./cmd/... ./internal/...
+          go vet ./cmd/... ./internal/...
 
-      - name: Go vet
+      - name: Go race tests
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -timeout=20m ./cmd/... ./internal/...
+
+      - name: Mesh parser fuzzing
         run: |
-          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go vet $(go list ./... | grep -v "/node_modules/")'
+          for target in FuzzSTL FuzzOBJ Fuzz3MFArchive Fuzz3MFModel; do
+            go test ./internal/mesh -run='^$' -fuzz="^${target}$" -fuzztime=15s -fuzzminimizetime=1s -parallel=2 -timeout=2m
+          done
 
       - name: Go vulnerability scan
-        run: |
-          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/... ./internal/...'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/... ./internal/...
 
       - name: Frontend install
         working-directory: web
@@ -62,8 +107,32 @@ jobs:
         working-directory: web
         run: npm run build
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Generate test image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: fileament
+          tags: type=raw,value=ci
+
       - name: Docker build
-        run: docker build -t fileament:ci .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
       - name: Production image smoke test
         run: python3 .github/scripts/smoke_container.py fileament:ci
+
+      - name: Record validated commit
+        id: revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          git diff --exit-code
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
