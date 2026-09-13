@@ -187,7 +187,7 @@ WHERE images.model_id = excluded.model_id`, img.ID, m.ID, img.RelPath, img.SortO
 		return err
 	}
 	for _, tag := range m.Tags {
-		slug := slugify(tag)
+		slug := tagSlug(tag)
 		if slug == "" {
 			continue
 		}
