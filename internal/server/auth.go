@@ -308,5 +308,8 @@ func randomToken(bytes int) (string, error) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	if status >= http.StatusInternalServerError {
+		err = errors.New("internal server error")
+	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }

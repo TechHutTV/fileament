@@ -123,7 +123,6 @@ func (a *App) listCollections() ([]Collection, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer members.Close()
 	for members.Next() {
 		var collectionID, modelID string
 		if err := members.Scan(&collectionID, &modelID); err != nil {
@@ -133,7 +132,7 @@ func (a *App) listCollections() ([]Collection, error) {
 			out[i].ModelIDs = append(out[i].ModelIDs, modelID)
 		}
 	}
-	return out, members.Err()
+	return out, errors.Join(members.Err(), members.Close())
 }
 
 func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
@@ -748,8 +747,8 @@ func (a *App) publicFileAllowed(ctx context.Context, s ShareLink, fileID string)
 
 func (a *App) collectionContains(ctx context.Context, collectionID, modelID string) bool {
 	var n int
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM collection_models WHERE collection_id = ? AND model_id = ?`, collectionID, modelID).Scan(&n)
-	return n > 0
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM collection_models WHERE collection_id = ? AND model_id = ?`, collectionID, modelID).Scan(&n)
+	return err == nil && n > 0
 }
 
 func publicError(w http.ResponseWriter, err error) {
