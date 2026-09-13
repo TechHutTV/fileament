@@ -6,7 +6,7 @@ import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
 import { subscribeThumbnailRefresh, useThumbnailQueryRefresh } from './thumbnailRefresh';
 import { useMetadataDraft } from './useMetadataDraft';
-import { api } from './api';
+import { api, APIError } from './api';
 import { usePublicShare } from './usePublicShare';
 import { createOwnerSession, OwnerSessionContext, useOwnerAPI, useOwnerSession } from './ownerSession';
 
@@ -828,9 +828,12 @@ function CollectionDetail({ slug }: { slug: string }) {
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const page = useInfiniteQuery({
     queryKey: ['collection', slug], initialPageParam: '',
-    queryFn: ({ pageParam }) => api(`/api/collections/${slug}${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ''}`) as Promise<Collection>,
+    queryFn: ({ pageParam, signal }) => api(`/api/collections/${slug}${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ''}`, { signal }) as Promise<Collection>,
     getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
+    retry: false,
   });
+  const unavailable = page.error instanceof APIError && [401, 403, 404].includes(page.error.status);
+  useEffect(() => { if (unavailable) setConfirmation(null); }, [unavailable]);
   const data = page.data?.pages[0];
   const models = [...new Map((page.data?.pages.flatMap((p) => p.models ?? []) ?? []).map((m) => [m.id, m])).values()];
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
@@ -854,7 +857,8 @@ function CollectionDetail({ slug }: { slug: string }) {
   const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => navigate('/collections') });
   const share = useMutation({ mutationFn: (body: { label: string; expiresAt: number }) => api('/api/shares', { method: 'POST', body: JSON.stringify({ scope: 'collection', targetId: data?.id, ...body }) }), onSuccess: () => qc.invalidateQueries({ queryKey: ['shares'] }) });
   const resetRemovalState = () => { remove.reset(); removeMember.reset(); };
-  if (!data) return <section className="content"><Empty text={page.isError ? 'Collection could not be loaded' : 'Loading collection'} /></section>;
+  const loadError = page.error && <CollectionReadError error={page.error} retrying={page.isFetching} onRetry={() => { if (page.isFetchNextPageError) void page.fetchNextPage({ cancelRefetch: false }); else void page.refetch({ cancelRefetch: false }); }} />;
+  if (!data || unavailable) return <section className="content">{loadError || <Empty text="Loading collection" />}</section>;
   return <section className="content">
     <CollectionForm key={data.id} collection={data} models={models} onSave={(body) => patch.mutateAsync({ id: data.id, slug, body })} />
     <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => { resetRemovalState(); setConfirmation({ title: 'Delete collection?', description: `Delete “${data.name}”? Its models stay in your library.`, confirmLabel: 'Delete collection', onConfirm: () => remove.mutate() }); }}><Trash2 size={16} />Delete collection</button></div>
@@ -862,10 +866,21 @@ function CollectionDetail({ slug }: { slug: string }) {
     <p>{models.length} of {data.modelCount} models shown</p>
     {reorder.isError && <p role="alert">The collection order could not be saved.</p>}
     <div className="collection-models">{models.map((model, index) => <div className="collection-model" key={model.id}><ModelCard model={model} /><div className="collection-actions"><button type="button" aria-label={`Move ${model.title} up`} disabled={index === 0 || reorder.isPending} onClick={() => reorder.mutate({ modelId: model.id, direction: 'up' })}>↑</button><button type="button" aria-label={`Move ${model.title} down`} disabled={index === data.modelCount - 1 || reorder.isPending} onClick={() => reorder.mutate({ modelId: model.id, direction: 'down' })}>↓</button><button type="button" className="danger" aria-label={`Remove ${model.title} from collection`} onClick={() => { resetRemovalState(); setConfirmation({ title: 'Remove from collection?', description: `Remove “${model.title}” from “${data.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => removeMember.mutate(model.id) }); }}><Trash2 size={16} /></button></div></div>)}</div>
-    {page.isError && <p role="alert">Collection models could not be loaded. Try again.</p>}
+    {loadError}
     {page.hasNextPage && <button type="button" className="load" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more models'}</button>}
     <ConfirmationDialog request={confirmation} busy={remove.isPending || removeMember.isPending} error={remove.isError || removeMember.isError ? 'This change could not be completed. Try again.' : undefined} onCancel={() => setConfirmation(null)} />
   </section>;
+}
+
+function CollectionReadError({ error, retrying, onRetry }: { error: Error; retrying: boolean; onRetry: () => void }) {
+  const status = error instanceof APIError ? error.status : undefined;
+  const message = status === 404 ? 'Collection not found. It may have been deleted or renamed.'
+    : status === 401 ? 'Sign in to view this collection.'
+    : status === 403 ? 'You do not have access to this collection.'
+    : status === 503 ? 'Fileament is temporarily unavailable or recovering data. Try again shortly.'
+    : error instanceof TypeError ? 'Unable to reach Fileament. Check your connection and try again.'
+    : 'Collection could not be loaded. Try again.';
+  return <div><p role="alert">{message}</p><button type="button" disabled={retrying} onClick={onRetry}>{retrying ? 'Retrying collection…' : 'Retry collection'}</button> <a href="/collections">Back to collections</a></div>;
 }
 
 function PublicPage({ token }: { token: string }) {
