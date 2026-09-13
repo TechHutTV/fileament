@@ -1028,7 +1028,7 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 	var files []ModelFile
 	var images []Image
 	var description string
-	var total int64
+	remaining := uint64(a.cfg.MaxUploadMB << 20)
 	var fileNames, imageNames uploadNameAllocator
 	for _, zf := range zr.File {
 		if err := ctx.Err(); err != nil {
@@ -1042,10 +1042,10 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
 			return nil, nil, "", errors.New("zip entry escapes destination")
 		}
-		total += int64(zf.UncompressedSize64)
-		if total > a.cfg.MaxUploadMB<<20 {
+		if zf.UncompressedSize64 > remaining {
 			return nil, nil, "", errors.New("zip exceeds uncompressed size cap")
 		}
+		remaining -= zf.UncompressedSize64
 		rc, err := zf.Open()
 		if err != nil {
 			return nil, nil, "", err

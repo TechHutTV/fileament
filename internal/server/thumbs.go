@@ -25,6 +25,9 @@ const (
 	thumbnailRenderVersionKey = "thumbnail_render_version"
 	thumbnailRenderVersion    = "3"
 	primaryThumbSourceName    = ".primary-thumb-source"
+	eventHeartbeatInterval    = 15 * time.Second
+	eventStreamLifetime       = 30 * time.Minute
+	eventWriteTimeout         = 10 * time.Second
 )
 
 type ThumbnailEvent struct {
@@ -380,15 +383,60 @@ func copyFile(dst, src string) error {
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), eventStreamLifetime)
+	defer cancel()
+	r = r.WithContext(ctx)
 	ch, reset := a.subscribeEventStream()
 	defer a.unsubscribeEvents(ch)
 	if !a.eventSessionValid(r) {
 		writeError(w, http.StatusUnauthorized, errSessionStateChanged)
 		return
 	}
+	controller := http.NewResponseController(w)
+	if r.ContentLength != 0 {
+		if r.ProtoMajor == 1 {
+			if err := controller.SetReadDeadline(time.Now()); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return
+			}
+		}
+		if err := controller.SetWriteDeadline(time.Now().Add(eventWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return
+		}
+		rejectRequest(w, r, http.StatusBadRequest, "event stream requests must not have a body")
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "private, no-store")
-	flusher, _ := w.(http.Flusher)
+	w.Header().Set("X-Accel-Buffering", "no")
+	write := func(frame string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		deadline, _ := ctx.Deadline()
+		if writeDeadline := time.Now().Add(eventWriteTimeout); writeDeadline.Before(deadline) {
+			deadline = writeDeadline
+		}
+		if err := controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		if n, err := io.WriteString(w, frame); err != nil {
+			return err
+		} else if n != len(frame) {
+			return io.ErrShortWrite
+		}
+		if err := controller.Flush(); err != nil {
+			return err
+		}
+		if err := controller.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		return nil
+	}
+	if err := write(": connected\n\n"); err != nil {
+		return
+	}
+	heartbeat := time.NewTicker(eventHeartbeatInterval)
+	defer heartbeat.Stop()
 	revalidate := time.NewTicker(time.Minute)
 	defer revalidate.Stop()
 	for {
@@ -397,6 +445,10 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-reset:
 			return
+		case <-heartbeat.C:
+			if err := write(": heartbeat\n\n"); err != nil {
+				return
+			}
 		case <-revalidate.C:
 			if !a.eventSessionValid(r) {
 				return
@@ -405,10 +457,9 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !a.eventSessionValid(r) {
 				return
 			}
-			b, _ := json.Marshal(evt)
-			_, _ = fmt.Fprintf(w, "event: thumbnail\ndata: %s\n\n", b)
-			if flusher != nil {
-				flusher.Flush()
+			b, err := json.Marshal(evt)
+			if err != nil || write(fmt.Sprintf("event: thumbnail\ndata: %s\n\n", b)) != nil {
+				return
 			}
 		}
 	}

@@ -53,6 +53,7 @@ type App struct {
 }
 
 func New(cfg config.Config, webFS fs.FS) (*App, error) {
+	cfg = cfg.NormalizeLimits()
 	if webFS == nil {
 		return nil, fmt.Errorf("web filesystem is required")
 	}
@@ -83,6 +84,7 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 }
 
 func (a *App) Close() error {
+	a.resetEventStreams()
 	a.backupCancel()
 	a.backupMu.Lock()
 	backupErr := a.clearPreparedBackup()

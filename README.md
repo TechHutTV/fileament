@@ -87,7 +87,7 @@ All configuration is optional and provided through environment variables.
 | `FILEAMENT_OWNER_PASSWORD` | unset | Seeds the owner password on first boot using the same policy as setup. Ignored after an owner password exists. |
 | `FILEAMENT_MAX_UPLOAD_MB` | `2048` | Maximum upload request size and maximum expanded ZIP size in MiB. |
 | `FILEAMENT_MAX_BACKUP_MB` | `8192` | Maximum archive and expanded backup size in MiB, for exports and restore uploads. |
-| `FILEAMENT_THUMB_WORKERS` | `2` | Number of background thumbnail workers. |
+| `FILEAMENT_THUMB_WORKERS` | `2` | Number of background thumbnail workers, from `0` to `32`. Set `0` to pause processing; preview jobs stay queued until workers are enabled and Fileament restarts. |
 | `FILEAMENT_BASE_URL` | unset | Public HTTP(S) origin used when displaying share links and determining secure-cookie behavior. Paths are ignored because Fileament does not support subpath mounting. |
 
 Example:
@@ -101,6 +101,8 @@ environment:
 ```
 
 `FILEAMENT_WEB_DIR` is only used by untagged development builds. Official production images embed the web interface and do not need a separate static directory.
+
+Upload, backup, and worker settings must be whole decimal numbers. Invalid values use the documented default. Upload and backup limits must be positive and fit in signed 64-bit bytes with an additional MiB reserved for multipart overhead (at most `8796093022206` MiB). These are byte-count limits, not preallocated memory or reserved disk space. Worker values outside `0`–`32` use the default of `2`; thumbnail processing has a separate limit of two active jobs.
 
 Authentication endpoints require JSON, limit request bodies to 16 KiB and passwords to 1024 bytes, and allow five seconds to receive the body. At most two authentication requests run concurrently. A shared installation-wide limit allows an initial burst of 10 attempts and replenishes one attempt every six seconds; excess attempts return HTTP `429` with `Retry-After`. Forwarded IP headers do not bypass this limit. Idle HTTP connections close after 60 seconds; active uploads, downloads, and event streams are unaffected by that idle timeout.
 
@@ -270,6 +272,8 @@ Owner endpoints require a session cookie. List responses contain card summaries:
 Pages default to 24 entries and accept limits from 1 to 100; invalid limits use the default. Pass `nextCursor` unchanged to load the next page. An empty cursor marks the end. Collection cursors belong to that collection and use position plus model ID as a stable tie-breaker. Restart pagination after changing membership or order. Public requests recheck the token and exact model membership; revoked or expired tokens return `410`, unavailable targets return `404`, and invalid cursors return `400`.
 
 Authenticated `/api/events` thumbnail events include `modelId`, `fileId`, `thumbPath`, and `status` (`done`, `pending` for retry, or `failed`). Events are advisory: fetch the owner model endpoint to reconcile current job state. Thumbnail job state is operational SQLite data and is excluded from durable model sidecars and public model responses. Rebuilding a fresh query index recreates missing preview work from the files and sidecars.
+
+The event stream flushes an initial comment immediately and sends heartbeat comments every 15 seconds. Fileament requests disabled proxy buffering with `X-Accel-Buffering: no`; configure the proxy to stream responses and allow an idle interval longer than the heartbeat. Each connection lasts at most 30 minutes before the browser reconnects and reconciles current state. Each network write has a 10-second deadline, shortened to the remaining stream lifetime; write or flush failures close the stream. `GET /api/events` rejects request bodies with HTTP `400` instead of waiting for unused bytes. Heartbeats contain no model data. Streams still require an owner session, revalidate it before every thumbnail event and once per minute while idle, and close on logout, password changes, restore, or application closure.
 
 The owner interface batches thumbnail events for 250 ms and refreshes the affected model or collection data. It reconciles after reconnects and every minute on catalog, model, and collection screens. Pending previews on model and upload screens also reconcile every 15 seconds. Upload refreshes use at most three concurrent requests and stop polling completed uploads. Events arriving during a refresh trigger another batch afterward; an unusually large burst falls back to full reconciliation. The server's selected cover remains authoritative.
 
