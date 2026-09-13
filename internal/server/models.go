@@ -761,8 +761,15 @@ func (a *App) handleTags(w http.ResponseWriter, r *http.Request) {
 	var tags []map[string]string
 	for rows.Next() {
 		var name, slug string
-		_ = rows.Scan(&name, &slug)
+		if err := rows.Scan(&name, &slug); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 		tags = append(tags, map[string]string{"name": name, "slug": slug})
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, tags)
 }

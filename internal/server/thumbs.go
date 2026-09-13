@@ -525,11 +525,15 @@ func (a *App) thumbAllowed(ctx context.Context, modelID, name string) bool {
 		return false
 	}
 	var n int
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM models WHERE id = ? AND primary_thumb = ?`, modelID, name).Scan(&n)
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM models WHERE id = ? AND primary_thumb = ?`, modelID, name).Scan(&n); err != nil {
+		return false
+	}
 	if n > 0 {
 		return true
 	}
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE model_id = ? AND thumb_path = ?`, modelID, filepath.ToSlash(filepath.Join("thumbs", name))).Scan(&n)
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE model_id = ? AND thumb_path = ?`, modelID, filepath.ToSlash(filepath.Join("thumbs", name))).Scan(&n); err != nil {
+		return false
+	}
 	return n > 0
 }
 
