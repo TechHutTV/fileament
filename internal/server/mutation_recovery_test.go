@@ -714,8 +714,11 @@ func TestThumbnailPublicationFailureRestoresPriorFiles(t *testing.T) {
 	}
 	select {
 	case event := <-events:
-		t.Fatalf("failed thumbnail published a completion: %+v", event)
+		if event.Status != "failed" || event.ThumbPath != "" || event.ModelID != fixture.model.ID {
+			t.Fatalf("failed thumbnail published an invalid state: %+v", event)
+		}
 	default:
+		t.Fatal("failed thumbnail did not publish its failure state")
 	}
 	assertMutationRestarts(t, app, before)
 }

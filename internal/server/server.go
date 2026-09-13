@@ -35,6 +35,7 @@ type App struct {
 	maintenance         atomic.Bool
 	mutationRecovery    atomic.Bool
 	stop                chan struct{}
+	thumbWake           chan struct{}
 	workerCancel        context.CancelFunc
 	workerWG            sync.WaitGroup
 	thumbMu             sync.Mutex
@@ -65,7 +66,7 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
+	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), thumbWake: make(chan struct{}, 1), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
 	if err := app.initializeData(); err != nil {
 		_ = db.Close()
 		return nil, err

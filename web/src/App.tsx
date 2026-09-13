@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Check, ChevronDown, Copy, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
-import { Suspense, lazy, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
@@ -52,6 +52,7 @@ export type Model = {
   files: ModelFile[];
   images?: ModelImage[];
   tags?: string[];
+  thumbnailJobs?: { fileId: string; status: 'pending' | 'running' | 'done' | 'failed' | 'unavailable'; attempts: number; retryAt?: number }[];
 };
 type ModelSummary = Pick<Model, 'id' | 'title' | 'primaryThumb' | 'totalBytes'> & { files: Pick<ModelFile, 'format' | 'triangleCount'>[] };
 type Page = { items: ModelSummary[]; nextCursor: string };
@@ -62,7 +63,7 @@ type Share = { id: string; token: string; url?: string; scope: 'model' | 'collec
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
 type ConfirmationRequest = { title: string; description: string; confirmLabel: string; onConfirm: () => void };
-type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'error' | 'removing';
+type UploadStatus = 'queued' | 'uploading' | 'processing' | 'ready' | 'preview-failed' | 'error' | 'removing';
 type UploadOrganization = 'separate' | 'grouped';
 type UploadItem = { key: string; file: File; files: File[]; title?: string; status: UploadStatus; collectionID?: string; model?: Model; error?: string };
 
@@ -210,7 +211,10 @@ function ModelCard({ model }: { model: ModelSummary }) {
 
 function Detail({ id }: { id: string }) {
   const qc = useQueryClient();
-  const { data: model, isLoading, isError } = useQuery<Model>({ queryKey: ['model', id], queryFn: () => api(`/api/models/${id}`) });
+  const { data: model, isLoading, isError } = useQuery<Model>({
+    queryKey: ['model', id], queryFn: () => api(`/api/models/${id}`),
+    refetchInterval: (query) => query.state.data?.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running') ? 15_000 : false,
+  });
   const collections = useQuery<Collection[]>({ queryKey: ['collections', id], queryFn: () => api(`/api/collections?model=${encodeURIComponent(id)}`) });
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [selectedFileID, setSelectedFileID] = useState('');
@@ -227,6 +231,7 @@ function Detail({ id }: { id: string }) {
     mutationFn: ({ fid, filename }) => api(`/api/models/${id}/files/${fid}`, { method: 'PATCH', body: JSON.stringify({ filename }) }),
     onSuccess: (updated) => {
       qc.setQueryData(['model', id], updated);
+      qc.invalidateQueries({ queryKey: ['model', id] });
       qc.invalidateQueries({ queryKey: ['models'] });
     },
   });
@@ -252,6 +257,8 @@ function Detail({ id }: { id: string }) {
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Variants and downloads</h2>
+        {model.thumbnailJobs?.some((job) => job.status === 'failed' || job.status === 'unavailable') && <div><p className="upload-error" role="alert">Your model is saved. A preview could not be generated.</p><RetryThumbnailButton model={model} onUpdate={(updated) => qc.setQueryData(['model', id], updated)} /></div>}
+        {model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running') && <p role="status">Generating previews. Your model files are available to download.</p>}
         {model.files.length === 0 && <p>No model files. Add a variant to preview or download.</p>}
         {model.files.map((f) => <ModelFileRow key={f.id} modelID={model.id} file={f} busy={renameFile.isPending} onRename={async (filename) => { await renameFile.mutateAsync({ fid: f.id, filename }); }} onUseThumbnail={() => setThumb.mutate(f.id)} onDelete={() => { resetDeletionState(); setConfirmation({ title: 'Delete variant?', description: `Delete “${f.filename}” from “${model.title}”? This cannot be undone.`, confirmLabel: 'Delete variant', onConfirm: () => deleteFile.mutate(f.id) }); }} />)}
         <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
@@ -323,9 +330,28 @@ function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<M
   );
 }
 
+function uploadStatusForModel(model: Model): UploadStatus {
+  if (model.thumbnailJobs?.some((job) => job.status === 'failed' || job.status === 'unavailable')) return 'preview-failed';
+  if (model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running')) return 'processing';
+  return model.files.length === 0 || model.primaryThumb || model.files.some((file) => fileThumbName(file)) ? 'ready' : 'processing';
+}
+
+function RetryThumbnailButton({ model, onUpdate }: { model: Model; onUpdate: (model: Model) => void }) {
+  const retry = useMutation({
+    mutationFn: async () => {
+      await api(`/api/models/${model.id}/thumbnails/retry`, { method: 'POST', body: '{}' });
+      return await api(`/api/models/${model.id}`) as Model;
+    },
+    onSuccess: onUpdate,
+  });
+  return <><button type="button" disabled={retry.isPending} onClick={() => retry.mutate()}>{retry.isPending ? 'Retrying previews…' : 'Retry previews'}</button>{retry.isError && <p className="upload-error" role="alert">Could not retry the preview. Try again shortly.</p>}</>;
+}
+
 function UploadPage() {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
+  const itemsRef = useRef(items);
+  useLayoutEffect(() => { itemsRef.current = items; }, [items]);
   const [itemToRemove, setItemToRemove] = useState<UploadItem | null>(null);
   const [removingKey, setRemovingKey] = useState('');
   const [removeError, setRemoveError] = useState('');
@@ -401,11 +427,11 @@ function UploadPage() {
       }
       if (await discardIfCancelled()) return;
       if (collectionChanged) qc.invalidateQueries({ queryKey: ['collections'] });
-      updateItem(item.key, { model, status: model.primaryThumb ? 'ready' : 'processing', error: collectionError });
-      if (!model.primaryThumb) {
+      updateItem(item.key, { model, status: uploadStatusForModel(model), error: collectionError });
+      if (uploadStatusForModel(model) === 'processing') {
         try {
           const refreshed = await api(`/api/models/${model.id}`) as Model;
-          if (refreshed.primaryThumb) updateItem(item.key, { model: refreshed, status: 'ready' });
+          updateItem(item.key, { model: refreshed, status: uploadStatusForModel(refreshed) });
         } catch {
           // Thumbnail events continue to reconcile uploads if this refresh races rendering.
         }
@@ -508,9 +534,10 @@ function UploadPage() {
     setVariantRemoveError('');
     try {
       const model = await api(`/api/models/${item.model.id}/files/${file.id}`, { method: 'DELETE' }) as Model;
+      model.thumbnailJobs = item.model.thumbnailJobs?.filter((job) => model.files.some((variant) => variant.id === job.fileId));
       setItems((current) => current.map((candidate) => {
         if (candidate.key !== item.key || !candidate.model) return candidate;
-        return { ...candidate, model, status: model.primaryThumb || model.files.some((variant) => fileThumbName(variant)) ? 'ready' : 'processing' };
+        return { ...candidate, model, status: uploadStatusForModel(model) };
       }));
       qc.invalidateQueries({ queryKey: ['models'] });
       qc.invalidateQueries({ queryKey: ['storage'] });
@@ -525,22 +552,34 @@ function UploadPage() {
   };
 
   useEffect(() => {
-    if (typeof EventSource === 'undefined') return undefined;
-    const events = new EventSource('/api/events');
-    events.addEventListener('thumbnail', (event) => {
-      const modelID = JSON.parse((event as MessageEvent).data).modelId as string;
-      void api(`/api/models/${modelID}`).then((model: Model) => {
-        setItems((current) => current.map((item) => item.model?.id === modelID ? { ...item, model, status: model.primaryThumb ? 'ready' : 'processing' } : item));
-      }).catch(() => undefined);
+    const controller = new AbortController();
+    const refreshing = new Set<string>();
+    const refresh = (modelID: string) => {
+      if (refreshing.has(modelID) || !itemsRef.current.some((item) => item.model?.id === modelID)) return;
+      refreshing.add(modelID);
+      void api(`/api/models/${modelID}`, { signal: controller.signal }).then((model: Model) => {
+        if (controller.signal.aborted) return;
+        setItems((current) => current.map((item) => item.model?.id === modelID && item.status !== 'removing' ? { ...item, model, status: uploadStatusForModel(model) } : item));
+      }).catch(() => undefined).finally(() => refreshing.delete(modelID));
+    };
+    const reconcile = () => itemsRef.current.forEach((item) => { if (item.model && (item.status === 'processing' || item.model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running'))) refresh(item.model.id); });
+    const events = typeof EventSource === 'undefined' ? undefined : new EventSource('/api/events');
+    events?.addEventListener('thumbnail', (event) => {
+      try {
+        const modelID: unknown = JSON.parse((event as MessageEvent).data).modelId;
+        if (typeof modelID === 'string') refresh(modelID);
+      } catch { /* Ignore incomplete events; reconciliation refreshes pending work. */ }
     });
-    return () => events.close();
+    events?.addEventListener('open', reconcile);
+    const interval = window.setInterval(reconcile, 15_000);
+    return () => { controller.abort(); window.clearInterval(interval); events?.close(); };
   }, []);
 
   useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
 
   const active = items.some((item) => item.status === 'queued' || item.status === 'uploading' || item.status === 'removing');
   const busy = active || !!removingVariantID;
-  const completed = items.filter((item) => item.status === 'ready' || item.status === 'processing').length;
+  const completed = items.filter((item) => item.status === 'ready' || item.status === 'processing' || item.status === 'preview-failed').length;
   return <section className="upload-page">
     <header className="upload-header">
       <span className="eyebrow">Add models</span>
@@ -600,19 +639,19 @@ function UploadPage() {
         const thumbnailName = item.model?.primaryThumb || fallbackThumb;
         const thumbnail = item.model && thumbnailName ? `/thumbs/${item.model.id}/${thumbnailName}` : '';
         const grouped = Math.max(item.files.length, variantCount) > 1;
-        const variants: { key: string; filename: string; sizeBytes: number; format: string; thumb: string; file?: ModelFile }[] = modelFiles
-          ? modelFiles.map((file) => ({ key: file.id, filename: file.filename, sizeBytes: file.sizeBytes, format: file.format.toUpperCase(), thumb: fileThumbName(file), file }))
+        const variants: { key: string; filename: string; sizeBytes: number; format: string; thumb: string; failed?: boolean; file?: ModelFile }[] = modelFiles
+          ? modelFiles.map((file) => ({ key: file.id, filename: file.filename, sizeBytes: file.sizeBytes, format: file.format.toUpperCase(), thumb: fileThumbName(file), failed: item.model?.thumbnailJobs?.some((job) => job.fileId === file.id && (job.status === 'failed' || job.status === 'unavailable')), file }))
           : item.files.map((file, index) => ({ key: `${file.name}-${index}`, filename: file.name, sizeBytes: file.size, format: file.name.split('.').pop()?.toUpperCase() ?? '', thumb: '' }));
-        const label = item.status === 'queued' ? 'Queued' : item.status === 'uploading' ? 'Uploading' : item.status === 'processing' ? 'Generating preview' : item.status === 'ready' ? 'Ready' : item.status === 'removing' ? 'Removing' : 'Needs attention';
-        const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
+        const label = item.status === 'queued' ? 'Queued' : item.status === 'uploading' ? 'Uploading' : item.status === 'processing' ? 'Generating preview' : item.status === 'ready' ? 'Ready' : item.status === 'preview-failed' ? 'Preview needs attention' : item.status === 'removing' ? 'Removing' : 'Needs attention';
+        const placeholder = item.status === 'queued' ? 'Waiting to upload' : item.status === 'uploading' ? 'Uploading model' : item.status === 'error' ? 'Upload failed' : item.status === 'preview-failed' ? 'Preview unavailable' : item.status === 'removing' ? 'Removing model' : 'Rendering preview';
         return <article className={`upload-card ${item.status}${grouped ? ' grouped' : ''}`} key={item.key}>
           <div className="upload-preview">{thumbnail ? <img src={thumbnail} alt={`${itemName} thumbnail`} /> : <div className="upload-placeholder"><Box size={38} /><span>{placeholder}</span></div>}{item.status === 'uploading' && <span className="upload-progress" />}</div>
           <button type="button" className="icon upload-remove" aria-label={`${item.model ? 'Remove' : 'Cancel'} ${itemName}${item.model ? '' : ' upload'}`} onClick={() => { if (item.model) { setRemoveError(''); setItemToRemove(item); } else { void removeItem(item); } }} disabled={item.status === 'removing'}><X size={17} /></button>
-          <div className="upload-card-body"><div><h3>{itemName}</h3><p>{variantCount > 1 ? `${variantCount} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}</div>
+          <div className="upload-card-body"><div><h3>{itemName}</h3><p>{variantCount > 1 ? `${variantCount} variants` : item.file.name} · {formatBytes(itemBytes)}</p></div><span className={`upload-status ${item.status === 'preview-failed' ? 'error' : item.status}`}>{item.status === 'ready' && <Check size={13} />}{label}</span>{item.error && <p className="upload-error">{item.error}</p>}{item.status === 'preview-failed' && item.model && <div><p className="upload-error" role="alert">Your model is saved. A preview could not be generated.</p><RetryThumbnailButton model={item.model} onUpdate={(model) => updateItem(item.key, { model, status: uploadStatusForModel(model) })} /></div>}</div>
           {grouped && <section className="upload-variants" role="region" aria-label={`${itemName} variants`}>
             <div className="upload-variants-heading"><strong>{variantCount} variants</strong><span>Preview each file and remove anything you do not want to keep.</span></div>
             <div className="upload-variant-grid">{variants.map((variant) => <article className="upload-variant" key={variant.key}>
-              <div className="upload-variant-preview">{item.model && variant.thumb ? <img src={`/thumbs/${item.model.id}/${variant.thumb}`} alt={`${variant.filename} variant preview`} /> : <div className={item.model ? 'loading' : undefined} aria-label={item.model ? `${variant.filename} preview rendering` : undefined}><Box size={22} aria-hidden /><span className={item.model ? 'visually-hidden' : undefined}>{item.model ? 'Preview pending' : 'Waiting'}</span></div>}</div>
+              <div className="upload-variant-preview">{item.model && variant.thumb ? <img src={`/thumbs/${item.model.id}/${variant.thumb}`} alt={`${variant.filename} variant preview`} /> : <div className={item.model && !variant.failed ? 'loading' : undefined} aria-label={item.model ? `${variant.filename} preview ${variant.failed ? 'unavailable' : 'rendering'}` : undefined}><Box size={22} aria-hidden /><span className={item.model && !variant.failed ? 'visually-hidden' : undefined}>{variant.failed ? 'Preview unavailable' : item.model ? 'Preview pending' : 'Waiting'}</span></div>}</div>
               <div className="upload-variant-copy"><strong title={variant.filename}>{variant.filename}</strong><small>{variant.format} · {formatBytes(variant.sizeBytes)}</small></div>
               {variant.file && modelFiles && modelFiles.length > 1 && <button type="button" className="icon upload-variant-remove" aria-label={`Remove ${variant.filename} variant`} title={`Remove ${variant.filename}`} disabled={!!removingVariantID} onClick={() => { setVariantRemoveError(''); setVariantToRemove({ item, file: variant.file! }); }}><Trash2 size={15} /></button>}
             </article>)}</div>

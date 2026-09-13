@@ -468,11 +468,10 @@ test('reconciles a thumbnail event that arrives before the upload response', asy
   fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['race'], 'race.stl')] } });
   await screen.findByText('Uploading');
   thumbnail(new MessageEvent('thumbnail', { data: JSON.stringify({ modelId: 'race.stl' }) }));
-  await waitFor(() => expect(calls).toContain('GET /api/models/race.stl'));
   releaseUpload(Response.json({ ...model, id: 'race.stl', title: 'race.stl', primaryThumb: undefined }, { status: 201 }));
 
   expect(await screen.findByAltText('race.stl thumbnail')).toHaveAttribute('src', '/thumbs/race.stl/card.png');
-  expect(calls.filter((call) => call === 'GET /api/models/race.stl')).toHaveLength(2);
+  expect(calls.filter((call) => call === 'GET /api/models/race.stl')).toHaveLength(1);
 });
 
 test('keeps a cancelled upload visible when server cleanup fails', async () => {

@@ -124,6 +124,10 @@ A 3MF package may contain at most 2,048 ZIP entries and 64 MiB of expanded conte
 
 At most two meshes are parsed concurrently, with a 30-second deadline including admission time. Thumbnail jobs have a one-minute deadline including admission, with a separate 30-second render deadline and at most two active jobs regardless of the configured worker count. Upload parsing stops when its request is canceled. Shutdown cancels active thumbnail processing and returns interrupted jobs to pending; invalid or timed-out jobs are marked failed. Rendering preserves an existing thumbnail if the replacement fails.
 
+Workers wake when uploads or preview retries add work, then drain ready jobs without waiting between renders. An idle worker checks for missed work at least every 30 seconds. Temporary database locks and resource-busy errors receive two automatic retries, scheduled after approximately two and four seconds; the retry schedule survives restarts. Invalid meshes, render limits, and other permanent failures require an explicit retry.
+
+The upload screen and owner model page show preview failures separately from upload failures: the model remains saved and downloadable. **Retry previews** queues failed or unavailable previews without uploading the files again or regenerating successful previews. Upload status refreshes on thumbnail events, reconnection, and every 15 seconds while work remains; the owner model page also refreshes pending previews every 15 seconds.
+
 ### Organize your library
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
@@ -236,7 +240,8 @@ Owner endpoints require a session cookie. List responses contain card summaries:
 | Endpoint | Response and pagination |
 | --- | --- |
 | `GET /api/models` | `{items, nextCursor}` with summaries. Supports `q`, `tag`, `collection`, `sort`, `limit`, and `cursor`. Sort values are `created`, `updated`, `title`, and `size`. |
-| `GET /api/models/{id}` | Complete owner model, including all variants, images, and metadata. |
+| `GET /api/models/{id}` | Complete owner model, including all variants, images, metadata, and `thumbnailJobs` with per-file `fileId`, `status`, `attempts`, and optional Unix-second `retryAt`. Status is `pending`, `running`, `done`, `failed`, or `unavailable`; internal error diagnostics are omitted. |
+| `POST /api/models/{id}/thumbnails/retry` | Accepts JSON `{}` and returns `{queued: N}`. Queues failed or unavailable previews, skipping files with pending/running jobs or successful previews. Requires owner authentication and the same origin protections as other mutations. |
 | `GET /api/collections` | Collection metadata, `coverThumb`, `modelCount`, and `containsModel`. Supply `?model={id}` to check that model's membership without downloading every member ID. |
 | `GET /api/collections/{id-or-slug}` | Collection metadata, total `modelCount`, and one page of summary `models` and matching `modelIds`, plus `nextCursor`. Supports `limit` and `cursor`. |
 | `PATCH /api/collections/{id}` | Updates metadata and returns the first page in the same shape as collection detail. |
@@ -244,6 +249,8 @@ Owner endpoints require a session cookie. List responses contain card summaries:
 | `GET /api/public/{token}` | For a model share, returns `{share, model}`. For a collection share, returns `{share, collection, model}`: a paginated collection summary plus one complete selected model. Use `model={id}` to select a current member, including one outside the current page; otherwise the first member of the page is selected. An empty collection has `model: null`. Supports `limit` and `cursor` for collection pages. |
 
 Pages default to 24 entries and accept limits from 1 to 100; invalid limits use the default. Pass `nextCursor` unchanged to load the next page. An empty cursor marks the end. Collection cursors belong to that collection and use position plus model ID as a stable tie-breaker. Restart pagination after changing membership or order. Public requests recheck the token and exact model membership; revoked or expired tokens return `410`, unavailable targets return `404`, and invalid cursors return `400`.
+
+Authenticated `/api/events` thumbnail events include `modelId`, `fileId`, `thumbPath`, and `status` (`done`, `pending` for retry, or `failed`). Events are advisory: fetch the owner model endpoint to reconcile current job state. Thumbnail job state is operational SQLite data and is excluded from durable model sidecars and public model responses. Rebuilding a fresh query index recreates missing preview work from the files and sidecars.
 
 ## Build from source
 
