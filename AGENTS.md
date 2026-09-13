@@ -80,7 +80,7 @@ The README API summary may lag a newly added route. Update it when API behavior 
 `server.New` receives `config.Config` and an injected `fs.FS`. It then:
 
 1. validates that the web filesystem contains `index.html`
-2. initializes the `/data` layout
+2. opens the configured data root, rejects links/special files outside disposable `tmp`, recovers interrupted restores, and initializes the `/data` layout
 3. opens SQLite with foreign keys enabled and a busy timeout
 4. applies schema migrations
 5. recovers interrupted model and collection mutations

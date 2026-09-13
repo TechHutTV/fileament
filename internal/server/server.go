@@ -61,32 +61,43 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 	if _, err := fs.Stat(webFS, "index.html"); err != nil {
 		return nil, fmt.Errorf("web filesystem does not contain index.html: %w", err)
 	}
-	if err := recoverInterruptedRestore(cfg.DataDir); err != nil {
-		return nil, err
-	}
-	if err := cleanupRestoreWorkspace(cfg.DataDir); err != nil {
-		return nil, err
-	}
-	if err := storage.EnsureLayout(cfg.DataDir); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, err
 	}
 	dataRoot, err := os.OpenRoot(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
+	keepRoot := false
+	defer func() {
+		if !keepRoot {
+			_ = dataRoot.Close()
+		}
+	}()
+	if err := storage.ValidateLayout(dataRoot); err != nil {
+		return nil, err
+	}
+	if err := recoverInterruptedRestore(cfg.DataDir); err != nil {
+		return nil, err
+	}
+	if err := cleanupRestoreWorkspace(cfg.DataDir); err != nil {
+		return nil, err
+	}
+	if err := storage.EnsureLayout(dataRoot); err != nil {
+		return nil, err
+	}
 	db, err := openDatabase(cfg.DataDir)
 	if err != nil {
-		_ = dataRoot.Close()
 		return nil, err
 	}
 	app := &App{cfg: cfg, db: db, dataRoot: dataRoot, webFS: webFS, stop: make(chan struct{}), thumbWake: make(chan struct{}, 1), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
 	if err := app.initializeData(); err != nil {
 		_ = db.Close()
-		_ = dataRoot.Close()
 		return nil, err
 	}
 	app.backupCtx, app.backupCancel = context.WithCancel(context.Background())
 	app.startWorkers()
+	keepRoot = true
 	return app, nil
 }
 
