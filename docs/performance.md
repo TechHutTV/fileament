@@ -212,7 +212,7 @@ cp -R web/dist/. cmd/fileament/dist/
 go test -tags embedded_ui ./cmd/fileament -run TestEmbeddedUIServesWithoutExternalDirectory -count=1 -v
 ~~~
 
-CI also runs the final image with disposable `/data` on tmpfs, a read-only root filesystem, dropped capabilities, a memory/CPU limit, and a loopback-only host port. The smoke test checks health, HTML, negotiated gzip, HEAD, conditional asset responses, and private/share cache policies, then removes its container. With a running Docker engine, run the same check from the repository root:
+CI also runs the final image with a disposable named volume and a bind mount owned by a custom non-root user. It verifies the default UID/GID, read-only root filesystem, dropped capabilities, no-new-privileges, memory/CPU/process limits, and loopback-only host port. The smoke test checks health, HTML, negotiated gzip, HEAD, conditional asset responses, and private/share cache policies. It also uploads a mesh, generates and reads its thumbnail, edits metadata, saves a collection, exports a backup, and checks persistence after restart. A private root-owned volume must fail startup; the documented one-time ownership repair must retain the saved library. Containers, the test volume, and the temporary bind directory are removed afterward. With a running Docker engine and Compose plugin, run the same check from the repository root:
 
 ~~~sh
 docker build -t fileament:ci .
