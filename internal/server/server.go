@@ -32,6 +32,12 @@ type App struct {
 	mutationFault       func(string) error
 	collectionPersistMu sync.Mutex
 	restoreMu           sync.Mutex
+	backupMu            sync.Mutex
+	backupCtx           context.Context
+	backupCancel        context.CancelFunc
+	backupTimer         *time.Timer
+	preparedBackup      *preparedBackup
+	backupFault         func(string) error
 	maintenance         atomic.Bool
 	mutationRecovery    atomic.Bool
 	stop                chan struct{}
@@ -71,16 +77,21 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	app.backupCtx, app.backupCancel = context.WithCancel(context.Background())
 	app.startWorkers()
 	return app, nil
 }
 
 func (a *App) Close() error {
+	a.backupCancel()
+	a.backupMu.Lock()
+	backupErr := a.clearPreparedBackup()
+	a.backupMu.Unlock()
 	a.stopWorkers()
 	if a.db != nil {
-		return a.db.Close()
+		return errors.Join(backupErr, a.db.Close())
 	}
-	return nil
+	return backupErr
 }
 
 func (a *App) Router() http.Handler {
@@ -201,9 +212,16 @@ func (a *App) dataAccessMiddleware(next http.Handler) http.Handler {
 }
 
 func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
-	var total int64
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(total_bytes), 0) FROM models`).Scan(&total)
-	writeJSON(w, http.StatusOK, map[string]int64{"totalBytes": total})
+	var usage storageUsage
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(total_bytes), 0) FROM models`).Scan(&usage.TotalBytes); err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("storage usage is unavailable"))
+		return
+	}
+	if err := usage.measure(r.Context(), a.cfg.DataDir); err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("storage usage could not be measured"))
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
 }
 
 func (a *App) serveSPA(w http.ResponseWriter, r *http.Request) {

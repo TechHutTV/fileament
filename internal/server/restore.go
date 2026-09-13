@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -142,7 +143,7 @@ func (a *App) handleInspectBackup(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) maxBackupBytes() int64 {
 	mb := a.cfg.MaxBackupMB
-	if mb <= 0 {
+	if mb <= 0 || mb > (math.MaxInt64-(1<<20))>>20 {
 		mb = 8192
 	}
 	return mb << 20
@@ -629,6 +630,12 @@ func (a *App) createSafetyBackup() (string, error) {
 	final := filepath.Join(dir, name)
 	if err := os.Rename(path, final); err != nil {
 		_ = os.Remove(path)
+		return "", err
+	}
+	if err := syncDirectory(dir); err != nil {
+		return "", err
+	}
+	if err := pruneSafetyBackups(dir, name); err != nil {
 		return "", err
 	}
 	return final, nil

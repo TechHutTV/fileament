@@ -666,7 +666,7 @@ function UploadPage() {
 
 function SettingsPage() {
   const qc = useQueryClient();
-  const { data } = useQuery<{ totalBytes: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
+  const { data, isError: storageError } = useQuery<{ totalBytes: number; diskBytes?: number | null; libraryBytes?: number; thumbnailBytes?: number; databaseBytes?: number; backupBytes?: number; workspaceBytes?: number; otherBytes?: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
   const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [shareToRevoke, setShareToRevoke] = useState<Share | null>(null);
   const revoke = useMutation({
@@ -679,13 +679,22 @@ function SettingsPage() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [modelColor, setModelColor] = useState(getModelColor);
-  const [backupDownloaded, setBackupDownloaded] = useState(false);
+  const [backupExpired, setBackupExpired] = useState(false);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const [inspection, setInspection] = useState<BackupInspection | null>(null);
   const [confirmation, setConfirmation] = useState('');
   const chooseModelColor = (color: string) => setModelColor(saveModelColor(color));
   const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); } });
-  const backup = useMutation({ mutationFn: downloadBackupFile, onMutate: () => setBackupDownloaded(false), onSuccess: () => setBackupDownloaded(true) });
+  const backup = useMutation<{ downloadUrl: string; filename: string; expiresAt: number; sizeBytes: number }, Error>({
+    mutationFn: () => api('/api/backups/prepare', { method: 'POST' }),
+    onMutate: () => setBackupExpired(false),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['storage'] }),
+  });
+  useEffect(() => {
+    if (!backup.data) return;
+    const timer = window.setTimeout(() => setBackupExpired(true), Math.max(0, backup.data.expiresAt * 1000 - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [backup.data]);
   const inspect = useMutation<BackupInspection, Error, File>({
     mutationFn: (file) => { const body = new FormData(); body.append('file', file); return api('/api/backups/inspect', { method: 'POST', body }); },
     onSuccess: (result) => { setInspection(result); setConfirmation(''); },
@@ -696,7 +705,7 @@ function SettingsPage() {
   });
   return <section className="content narrow settings-page">
     <PageHeader eyebrow="Owner controls" title="Settings" description="Manage appearance, storage, account security, and public access to your library." />
-    <div className="storage-card"><span className="surface-icon"><HardDrive size={20} /></span><div><span>Library storage</span><strong>{formatBytes(data?.totalBytes ?? 0)}</strong></div></div>
+    <div className="storage-card"><span className="surface-icon"><HardDrive size={20} /></span><div><span>{data?.diskBytes != null ? 'Disk usage' : 'Model payload'}</span><strong>{storageError ? 'Unavailable' : formatBytes(data?.diskBytes ?? data?.totalBytes ?? 0)}</strong>{data?.libraryBytes != null && <small>Model payload: {formatBytes(data.totalBytes)}. File sizes: library {formatBytes(data.libraryBytes)}, thumbnails {formatBytes(data.thumbnailBytes ?? 0)}, database {formatBytes(data.databaseBytes ?? 0)}, safety backups {formatBytes(data.backupBytes ?? 0)}, workspace {formatBytes(data.workspaceBytes ?? 0)}, other {formatBytes(data.otherBytes ?? 0)}.</small>}</div></div>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Palette size={19} />} title="Viewer" description="Choose the material color used for STL and OBJ model previews on this browser." />
       <div className="model-color-setting">
@@ -708,11 +717,13 @@ function SettingsPage() {
       <SectionHeading icon={<Download size={19} />} title="Backup and restore" description="Download a complete copy of this Fileament installation or replace it from a previous backup." />
       <div className="backup-action">
         <div><strong>Create backup</strong><p>Includes models, files, images, collections, settings, and share links. Login sessions are intentionally excluded.</p></div>
-        <button type="button" disabled={backup.isPending} onClick={() => backup.mutate()}><Download size={17} />{backup.isPending ? 'Preparing backup' : 'Create and download backup'}</button>
+        <button type="button" disabled={backup.isPending} onClick={() => backup.mutate()}><Download size={17} />{backup.isPending ? 'Preparing backup' : 'Create backup'}</button>
       </div>
       <p className="backup-warning">Treat downloaded backups as sensitive. They contain the owner password hash and active share links.</p>
-      {backup.isError && <p className="error" role="alert">Backup could not be created.</p>}
-      {backupDownloaded && <p className="success" role="status">Backup downloaded.</p>}
+      {backup.isPending && <p role="status">Preparing your backup. Large libraries can take several minutes.</p>}
+      {backup.isError && <p className="error" role="alert">Backup could not be created. Check the server's available storage and backup size limit, then try again after any other backup finishes.</p>}
+      {backup.isSuccess && !backupExpired && <><p className="success" role="status">Your backup is ready. This link expires at {new Date(backup.data.expiresAt * 1000).toLocaleTimeString()} or when another backup is created.</p><a className="button-link" href={backup.data.downloadUrl} download={backup.data.filename}><Download size={17} />Download backup ({formatBytes(backup.data.sizeBytes)})</a></>}
+      {backup.isSuccess && backupExpired && <p role="status">The download link expired. Create a new backup to download it.</p>}
       <div className="restore-divider" />
       <form className="restore-form" onSubmit={(event) => { event.preventDefault(); if (restoreFile) inspect.mutate(restoreFile); }}>
         <div><strong>Restore backup</strong><p>Choose a Fileament backup to validate and review. Current data is not changed during review.</p></div>
@@ -1105,21 +1116,6 @@ async function api(path: string, init: RequestInit = {}) {
   const body = await res.text();
   if (!res.ok) throw new Error(body);
   return body ? JSON.parse(body) : null;
-}
-
-async function downloadBackupFile() {
-  const response = await fetch('/api/backups', { method: 'POST', credentials: 'include' });
-  if (!response.ok) throw new Error(await response.text());
-  const disposition = response.headers.get('Content-Disposition') ?? '';
-  const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? 'fileament-backup.fileament';
-  const url = window.URL.createObjectURL(await response.blob());
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(url);
 }
 
 function navigate(path: string, replace = false) {

@@ -691,30 +691,66 @@ test('persists the selected model color from settings', async () => {
   expect(localStorage.getItem('fileament-model-color')).toBe('#4f7fb5');
 });
 
-test('creates and downloads a sensitive Fileament backup from settings', async () => {
+test('prepares a sensitive backup and offers a normal browser download', async () => {
   window.history.pushState({}, '', '/settings');
   const calls: string[] = [];
-  const createObjectURL = vi.fn(() => 'blob:fileament-backup');
-  const revokeObjectURL = vi.fn();
-  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
-  vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+  let finish: (response: Response) => void = () => undefined;
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
-    if (url.includes('/api/storage')) return Response.json({ totalBytes: 2048 });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 2048, diskBytes: 8192, libraryBytes: 2048, thumbnailBytes: 1024, databaseBytes: 1024, backupBytes: 1024, workspaceBytes: 0, otherBytes: 0 });
     if (url.includes('/api/shares')) return Response.json([]);
-    if (url === '/api/backups' && init?.method === 'POST') return new Response('backup bytes', { headers: { 'Content-Disposition': 'attachment; filename="fileament-backup-test.fileament"' } });
+    if (url === '/api/backups/prepare' && init?.method === 'POST') return new Promise<Response>((resolve) => { finish = resolve; });
     return Response.json({});
   }));
   renderApp();
 
-  fireEvent.click(await screen.findByRole('button', { name: /create and download backup/i }));
-  await waitFor(() => expect(calls).toContain('POST /api/backups'));
-  expect(createObjectURL).toHaveBeenCalled();
-  expect(click).toHaveBeenCalled();
-  expect(revokeObjectURL).toHaveBeenCalledWith('blob:fileament-backup');
-  expect(await screen.findByText('Backup downloaded.')).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole('button', { name: /^create backup$/i }));
+  await waitFor(() => expect(calls).toContain('POST /api/backups/prepare'));
+  expect(screen.getByRole('button', { name: 'Preparing backup' })).toBeDisabled();
+  expect(screen.getByText(/Large libraries can take several minutes/)).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: /download backup/i })).not.toBeInTheDocument();
+  await act(async () => finish(Response.json({ downloadUrl: '/api/backups/download/test-token', filename: 'library.fileament', sizeBytes: 1024, expiresAt: Math.floor(Date.now() / 1000) + 900 })));
+  const link = await screen.findByRole('link', { name: /download backup/i });
+  expect(link).toHaveAttribute('href', '/api/backups/download/test-token');
+  expect(link).toHaveAttribute('download', 'library.fileament');
+  expect(calls).not.toContain('GET /api/backups/download/test-token');
+  expect(screen.queryByText('Backup downloaded.')).not.toBeInTheDocument();
+  expect(screen.getByText(/safety backups 1.0 KB, workspace 0 B/)).toBeInTheDocument();
+});
+
+test('explains backup failure and lets the owner retry', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    if (url === '/api/backups/prepare') return Response.json({ error: 'busy' }, { status: 409 });
+    return Response.json({});
+  }));
+  renderApp();
+  fireEvent.click(await screen.findByRole('button', { name: /^create backup$/i }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/try again after any other backup finishes/);
+  expect(screen.getByRole('button', { name: /^create backup$/i })).toBeEnabled();
+  expect(screen.queryByRole('link', { name: /download backup/i })).not.toBeInTheDocument();
+});
+
+test('removes an expired backup download link', async () => {
+  window.history.pushState({}, '', '/settings');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url.includes('/api/storage')) return Response.json({ totalBytes: 0 });
+    if (url.includes('/api/shares')) return Response.json([]);
+    if (url === '/api/backups/prepare') return Response.json({ downloadUrl: '/api/backups/download/expired', filename: 'library.fileament', sizeBytes: 1024, expiresAt: 1 });
+    return Response.json({});
+  }));
+  renderApp();
+  fireEvent.click(await screen.findByRole('button', { name: /^create backup$/i }));
+  expect(await screen.findByText(/The download link expired/)).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: /download backup/i })).not.toBeInTheDocument();
 });
 
 test('reviews and explicitly confirms a full restore before signing out', async () => {
