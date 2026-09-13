@@ -57,7 +57,7 @@ test('public selection loads full details independently of the paged member list
     calls.push(url);
     if (url.endsWith('/status')) return new Response(null, { status: 204 });
     if (url === '/api/public/token?model=m2') return Response.json({ model: selected, collection });
-    if (url === '/api/public/token?model=m2&cursor=page-two') return Response.json({ model: selected, collection: { ...collection, models: [nextCard], nextCursor: '' } });
+    if (url === '/api/public/token?model=m2&cursor=page-two&refresh=1') return Response.json({ model: selected, collection: { ...collection, models: [nextCard], nextCursor: '' } });
     return Response.json({});
   }));
   renderPage('/s/token?model=m2');
@@ -65,6 +65,6 @@ test('public selection loads full details independently of the paged member list
   expect(screen.getByText('Full selected details')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Load more models' }));
   expect(await screen.findByRole('link', { name: 'Later part' })).toHaveAttribute('href', '/s/token?model=m2');
-  expect(calls).toContain('/api/public/token?model=m2&cursor=page-two');
+  expect(calls).toContain('/api/public/token?model=m2&cursor=page-two&refresh=1');
   expect(screen.queryByRole('button', { name: 'Load more models' })).not.toBeInTheDocument();
 });

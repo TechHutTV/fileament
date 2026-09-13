@@ -7,6 +7,7 @@ import { ViewerBoundary } from './ViewerBoundary';
 import { subscribeThumbnailRefresh, useThumbnailQueryRefresh } from './thumbnailRefresh';
 import { useMetadataDraft } from './useMetadataDraft';
 import { api } from './api';
+import { usePublicShare } from './usePublicShare';
 import { createOwnerSession, OwnerSessionContext, useOwnerAPI, useOwnerSession } from './ownerSession';
 
 const ModelViewer = lazy(() => import('./Viewer'));
@@ -62,7 +63,7 @@ type ModelSummary = Pick<Model, 'id' | 'title' | 'primaryThumb' | 'totalBytes'> 
 type Page = { items: ModelSummary[]; nextCursor: string };
 type Me = { authenticated: boolean; setupRequired: boolean; context?: string };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: ModelSummary[]; modelCount: number; containsModel?: boolean; nextCursor?: string };
-type PublicPageData = { share?: Share; model?: Model | null; collection?: Collection };
+export type PublicPageData = { share?: Share; model?: Model | null; collection?: Collection; modelUnavailable?: boolean };
 type Share = { id: string; token: string; url?: string; scope: 'model' | 'collection'; targetId: string; targetName?: string; label?: string; expiresAt?: number; revokedAt?: number; hitCount: number; createdAt: number };
 type BackupManifest = { backupFormatVersion: number; dataFormatVersion: number; databaseVersion: number; createdAt: string; models: number; files: number; collections: number };
 type BackupInspection = { restoreToken: string; manifest: BackupManifest };
@@ -76,14 +77,15 @@ export function Root() {
 }
 
 export function App() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [location, setLocation] = useState(window.location.pathname + window.location.search);
+  const path = location.split('?')[0];
   useEffect(() => {
-    const update = () => setPath(window.location.pathname);
+    const update = () => setLocation(window.location.pathname + window.location.search);
     window.addEventListener('popstate', update);
     window.addEventListener(NAVIGATION_EVENT, update);
     return () => { window.removeEventListener('popstate', update); window.removeEventListener(NAVIGATION_EVENT, update); };
   }, []);
-  if (path.startsWith('/s/')) return <PublicPage token={path.split('/')[2]} />;
+  if (path.startsWith('/s/')) return <PublicPage key={location} token={path.split('/')[2]} />;
   return <OwnerApp path={path} />;
 }
 
@@ -868,74 +870,25 @@ function CollectionDetail({ slug }: { slug: string }) {
 
 function PublicPage({ token }: { token: string }) {
   const selected = new URLSearchParams(window.location.search).get('model');
-  const [unavailable, setUnavailable] = useState(false);
-  const page = useInfiniteQuery({
-    queryKey: ['public', token, selected],
-    initialPageParam: '',
-    queryFn: ({ pageParam }) => {
-      const query = new URLSearchParams();
-      if (selected) query.set('model', selected);
-      if (pageParam) query.set('cursor', pageParam);
-      return api(`/api/public/${token}${query.size ? `?${query}` : ''}`) as Promise<PublicPageData>;
-    },
-    getNextPageParam: (lastPage) => lastPage.collection?.nextCursor || undefined,
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
-  const data = page.data?.pages[0];
-  const members = [...new Map((page.data?.pages.flatMap((p) => p.collection?.models ?? []) ?? []).map((m) => [m.id, m])).values()];
-  useEffect(() => {
-    let active = true;
-    setUnavailable(false);
-    const validate = async () => {
-      try {
-        const response = await fetch(`/api/public/${token}/status`, { credentials: 'include' });
-        if (active && (response.status === 404 || response.status === 410)) setUnavailable(true);
-      } catch {
-        // Keep the current page during transient network failures; reconnect rechecks it.
-      }
-    };
-    const validateVisible = () => { if (document.visibilityState === 'visible') void validate(); };
-    void validate();
-    const interval = window.setInterval(() => { void validate(); }, 60_000);
-    window.addEventListener('focus', validate);
-    window.addEventListener('online', validate);
-    document.addEventListener('visibilitychange', validateVisible);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-      window.removeEventListener('focus', validate);
-      window.removeEventListener('online', validate);
-      document.removeEventListener('visibilitychange', validateVisible);
-    };
-  }, [token]);
-  useEffect(() => {
-    const expiresAt = data?.share?.expiresAt;
-    if (!expiresAt) return undefined;
-    let timeout = 0;
-    const expire = () => {
-      const remaining = expiresAt * 1000 - Date.now();
-      if (remaining <= 0) {
-        setUnavailable(true);
-        return;
-      }
-      timeout = window.setTimeout(expire, Math.min(remaining, 2_147_483_647));
-    };
-    expire();
-    return () => window.clearTimeout(timeout);
-  }, [data?.share?.expiresAt]);
-  if ((!data && page.isError) || unavailable) return <Shell><Empty text="Share not available" /></Shell>;
+  const page = usePublicShare(token, selected);
+  const data = page.pages[0];
+  const members = [...new Map(page.pages.flatMap((p) => p.collection?.models ?? []).map((m) => [m.id, m])).values()];
+  if (page.unavailable) return <Shell><Empty text="Share not available" /></Shell>;
   const model = data?.model;
-  return <Shell><section className="detail public">{data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{members.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}{page.hasNextPage && <button type="button" disabled={page.isFetchingNextPage} onClick={() => { void page.fetchNextPage(); }}>{page.isFetchingNextPage ? 'Loading more' : 'Load more models'}</button>}{page.isError && <span role="alert">More models could not be loaded. Try again.</span>}</div>}{model ? <PublicModel key={model.id} model={model} token={token} /> : <Empty text={data?.collection ? 'No models in this collection' : 'Loading share'} />}</section></Shell>;
+  const nextCursor = page.pages.at(-1)?.collection?.nextCursor;
+  return <Shell><section className="detail public">
+    {data?.collection && <div className="collection-strip"><strong>{data.collection.name}</strong>{members.map((m) => <a key={m.id} className={m.id === model?.id ? 'active' : ''} href={`/s/${token}?model=${m.id}`}>{m.title}</a>)}{nextCursor && <button type="button" disabled={!!page.loading} onClick={page.more}>{page.loading === 'more' ? 'Loading more' : 'Load more models'}</button>}</div>}
+    {page.error && <p role="alert">{data ? 'The share could not be refreshed. Try again.' : 'The share could not be loaded. Try again.'} <button type="button" disabled={!!page.loading} onClick={page.refresh}>Retry</button></p>}
+    {model ? <PublicModel key={model.id} model={model} token={token} /> : <Empty text={data?.modelUnavailable ? 'This model is no longer in the shared collection. Choose another model.' : data?.collection ? 'No models in this collection' : page.error ? 'Share temporarily unavailable' : 'Loading share'} />}
+  </section></Shell>;
 }
 
 function PublicModel({ model, token }: { model: Model; token: string }) {
   const [selectedFileID, setSelectedFileID] = useState(model.files[0]?.id ?? '');
-  const [forceViewer, setForceViewer] = useState(false);
+  const [approvedFileID, setApprovedFileID] = useState('');
   const file = model.files.find((f) => f.id === selectedFileID) ?? model.files[0];
   const canAutoLoad = canAutoLoadViewer(file);
-  return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2>{model.files.length === 0 ? <p>No model files are available.</p> : <Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />}{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
+  return <><div className="viewer">{file && (canAutoLoad || approvedFileID === file.id) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setApprovedFileID(file.id)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2>{model.files.length === 0 ? <p>No model files are available.</p> : <Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setApprovedFileID(''); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />}{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
 }
 
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {
