@@ -31,12 +31,13 @@ def docker(*args, timeout=120):
 
 
 @contextmanager
-def container(image, mount, user=None):
+def container(image, mount, user=None, data_dir="/data"):
     options = ["--user", user] if user else []
     identifier = docker(
         "create", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--memory=1g", "--cpus=2", "--pids-limit=128", "--mount", mount,
         "--publish", "127.0.0.1::8080", "--env", "FILEAMENT_WEB_DIR=/missing-external-ui",
+        "--env", "FILEAMENT_DATA_DIR=" + data_dir, "--env", "SQLITE_TMPDIR=/missing-temp-directory",
         *options, image,
     )
     try:
@@ -183,16 +184,16 @@ def check_catalog(client, fixture):
     assert collection["modelIds"] == [model_id], "collection membership did not survive restart"
 
 
-def check_data_owner(identifier, uid, gid):
+def check_data_owner(identifier, uid, gid, data_dir="/data"):
     # Read archive headers only; never extract or print the disposable credentials.
     with tempfile.TemporaryFile() as snapshot:
-        subprocess.run(["docker", "cp", identifier + ":/data/.", "-"], stdout=snapshot, check=True, timeout=45)
+        subprocess.run(["docker", "cp", identifier + ":" + data_dir + "/.", "-"], stdout=snapshot, check=True, timeout=45)
         snapshot.seek(0)
         with tarfile.open(fileobj=snapshot) as archive:
             names = set()
             for item in archive:
                 assert (item.uid, item.gid) == (uid, gid), f"incorrect data ownership: {item.name}"
-                names.add(item.name.removeprefix("./").removeprefix("data/"))
+                names.add(item.name.removeprefix("./").removeprefix(Path(data_dir).name + "/"))
             assert "fileament.db" in names and "collections.json" in names, "persistent files are missing"
 
 
@@ -234,13 +235,14 @@ def smoke(image):
     with tempfile.TemporaryDirectory(prefix="fileament-smoke-bind-") as directory:
         uid, gid = (os.getuid(), os.getgid()) if os.getuid() else (10001, 10001)
         os.chown(directory, uid, gid)
-        with container(image, f"type=bind,src={directory},dst=/data", f"{uid}:{gid}") as identifier:
+        data_dir = "/data/custom library"
+        with container(image, f"type=bind,src={directory},dst=/data", f"{uid}:{gid}", data_dir) as identifier:
             fixture = create_catalog(client_for(identifier))
             docker("stop", "--time", "10", identifier)
-            check_data_owner(identifier, uid, gid)
+            check_data_owner(identifier, uid, gid, data_dir)
             docker("start", identifier)
             check_catalog(client_for(identifier), fixture)
-            print("Custom non-root bind-mount user and restart passed")
+            print("Custom non-root bind-mount user, data directory and restart passed")
     print("Production image smoke test passed")
 
 

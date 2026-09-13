@@ -89,7 +89,7 @@ For a version-pinned deployment, replace `latest` with the release number you wa
 
 ### Container permissions and limits
 
-The production image runs as UID/GID `65532:65532`. It prepares `/data` with that ownership and private directory permissions; a new empty named volume inherits them. All runtime writes, including temporary uploads and backup workspaces, stay under `/data`, so the rest of the container can be read-only. No shell or startup ownership-changing helper is included in the production image.
+The production image runs as UID/GID `65532:65532`. It prepares `/data` with that ownership and private directory permissions; a new empty named volume inherits them. All runtime writes, including temporary uploads, SQLite temporary files, and backup workspaces, stay under the configured data directory (default `/data`), so the rest of the container can be read-only. At process startup, Fileament sets `SQLITE_TMPDIR` to that directory's `tmp` subdirectory, overriding any inherited value. If you change `FILEAMENT_DATA_DIR`, keep that location on a writable persistent mount. No shell or startup ownership-changing helper is included in the production image.
 
 The examples bind the published port to loopback for owner setup and a reverse proxy on the host. To allow access from your LAN, replace `127.0.0.1` with the intended private host address and complete owner setup before permitting untrusted access. A reverse proxy in another container can instead use Fileament's container port on a shared Docker network.
 

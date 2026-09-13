@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -15,11 +16,7 @@ import (
 
 func main() {
 	cfg := config.FromEnv()
-	webFS, err := webFilesystem(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	app, err := server.New(cfg, webFS)
+	app, err := newApp(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,4 +42,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+}
+
+func newApp(cfg config.Config) (*server.App, error) {
+	tempDir, err := filepath.Abs(filepath.Join(cfg.DataDir, "tmp"))
+	if err != nil {
+		return nil, err
+	}
+	// SQLite snapshots the environment on first use; configure it before opening any database.
+	if err := os.Setenv("SQLITE_TMPDIR", tempDir); err != nil {
+		return nil, err
+	}
+	webFS, err := webFilesystem(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return server.New(cfg, webFS)
 }
