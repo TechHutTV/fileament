@@ -587,7 +587,7 @@ test('catalog exposes filters, sorting, pagination, and owner nav', async () => 
   fireEvent.click(screen.getByRole('button', { name: /load more/i }));
   expect(await screen.findByText('Second Model')).toBeInTheDocument();
   refreshed = true;
-  thumbnail(new Event('thumbnail'));
+  thumbnail(new MessageEvent('thumbnail', { data: JSON.stringify({ modelId: 'm1' }) }));
   expect(await screen.findByText('Calibration Cube Updated')).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByRole('link', { name: /second model/i })).not.toBeInTheDocument());
 });
@@ -644,7 +644,7 @@ test('renders selected collection cover thumbnails with a folder fallback', asyn
   let emitThumbnail: (() => void) | undefined;
   vi.stubGlobal('EventSource', class {
     addEventListener(type: string, listener: EventListener) {
-      if (type === 'thumbnail') emitThumbnail = () => listener(new Event('thumbnail'));
+      if (type === 'thumbnail') emitThumbnail = () => listener(new MessageEvent('thumbnail', { data: JSON.stringify({ modelId: 'm1' }) }));
     }
     close = vi.fn();
   });

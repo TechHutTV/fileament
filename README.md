@@ -246,6 +246,8 @@ Browser mutations must originate from Fileament itself. Go's origin protection r
 
 API responses, owner assets, public shared assets and share pages use `Cache-Control: private, no-store`, including errors and access-status responses. Configure proxies to honor this policy so cached content cannot bypass a later authorization or share-revocation check. Revocation cannot retract a copy someone already downloaded.
 
+Hash-named frontend JavaScript and CSS use `Cache-Control: public, max-age=31536000, immutable`. The build includes gzip copies, which Fileament serves when accepted by the client, with `Vary: Accept-Encoding` and separate validators for each encoding. Ordinary HTML and unhashed frontend files use `no-cache`; share-page HTML uses `private, no-store`. Missing files under `/assets/` return `404`. Static assets support `GET` and `HEAD`. Identity responses support byte ranges; gzip responses are sent whole. These policies apply in both embedded and external UI modes.
+
 Owner and share pages reject framing and send no referrer information on outgoing requests. The content security policy also blocks plugins, foreign base URLs, and cross-origin form targets. It leaves script, style, image, and connection sources unrestricted so the existing viewer and Markdown image behavior remain supported. Raw mesh responses retain their stricter sandbox policy.
 
 Only explicit share links are public. Owner pages and model assets require an authenticated session.
@@ -268,6 +270,8 @@ Owner endpoints require a session cookie. List responses contain card summaries:
 Pages default to 24 entries and accept limits from 1 to 100; invalid limits use the default. Pass `nextCursor` unchanged to load the next page. An empty cursor marks the end. Collection cursors belong to that collection and use position plus model ID as a stable tie-breaker. Restart pagination after changing membership or order. Public requests recheck the token and exact model membership; revoked or expired tokens return `410`, unavailable targets return `404`, and invalid cursors return `400`.
 
 Authenticated `/api/events` thumbnail events include `modelId`, `fileId`, `thumbPath`, and `status` (`done`, `pending` for retry, or `failed`). Events are advisory: fetch the owner model endpoint to reconcile current job state. Thumbnail job state is operational SQLite data and is excluded from durable model sidecars and public model responses. Rebuilding a fresh query index recreates missing preview work from the files and sidecars.
+
+The owner interface batches thumbnail events for 250 ms and refreshes the affected model or collection data. It reconciles after reconnects and every minute on catalog, model, and collection screens. Pending previews on model and upload screens also reconcile every 15 seconds. Upload refreshes use at most three concurrent requests and stop polling completed uploads. Events arriving during a refresh trigger another batch afterward; an unusually large burst falls back to full reconciliation. The server's selected cover remains authoritative.
 
 ## Build from source
 
@@ -310,7 +314,7 @@ docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine
   sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/"); go vet $(go list ./... | grep -v "/node_modules/")'
 ```
 
-Generated frontend output is built when needed and must not be committed.
+`npm run build` creates the UI and gzip copies of its hashed JavaScript and CSS. Production builds embed both representations in the standalone executable. Generated frontend output is built when needed and must not be committed.
 
 CI also scans the backend with `govulncheck` v1.8.0. Keep the minimum Go version in `go.mod`, the production builder, and the CI images on a supported patch release from the [Go release history](https://go.dev/doc/devel/release). Builds with older toolchains are rejected rather than silently producing an executable with known standard-library vulnerabilities.
 
