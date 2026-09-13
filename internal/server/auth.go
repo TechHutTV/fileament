@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
@@ -63,10 +64,16 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"authenticated": a.validSession(r),
+	authenticated := a.validSession(r)
+	response := map[string]any{
+		"authenticated": authenticated,
 		"setupRequired": !owner,
-	})
+	}
+	if authenticated {
+		cookie, _ := r.Cookie(sessionCookieName)
+		response["context"] = ownerSessionContext(cookie.Value)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +228,13 @@ func (a *App) validSession(r *http.Request) bool {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token = ?`, c.Value)
 		return false
 	}
-	return true
+	expected := r.Header.Get("X-Fileament-Context")
+	return expected == "" || expected == ownerSessionContext(c.Value)
+}
+
+func ownerSessionContext(token string) string {
+	context := sha256.Sum256([]byte("fileament:owner-context:" + token))
+	return fmt.Sprintf("%x", context)
 }
 
 func (a *App) requireAuth(next http.Handler) http.Handler {

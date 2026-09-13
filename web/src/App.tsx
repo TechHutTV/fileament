@@ -6,6 +6,8 @@ import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
 import { subscribeThumbnailRefresh, useThumbnailQueryRefresh } from './thumbnailRefresh';
 import { useMetadataDraft } from './useMetadataDraft';
+import { api } from './api';
+import { createOwnerSession, OwnerSessionContext, useOwnerAPI, useOwnerSession } from './ownerSession';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
@@ -58,7 +60,7 @@ export type Model = {
 };
 type ModelSummary = Pick<Model, 'id' | 'title' | 'primaryThumb' | 'totalBytes'> & { files: Pick<ModelFile, 'format' | 'triangleCount'>[] };
 type Page = { items: ModelSummary[]; nextCursor: string };
-type Me = { authenticated: boolean; setupRequired: boolean };
+type Me = { authenticated: boolean; setupRequired: boolean; context?: string };
 type Collection = { id: string; name: string; slug: string; description: string; coverModelId?: string; coverThumb?: string; modelIds?: string[]; models?: ModelSummary[]; modelCount: number; containsModel?: boolean; nextCursor?: string };
 type PublicPageData = { share?: Share; model?: Model | null; collection?: Collection };
 type Share = { id: string; token: string; url?: string; scope: 'model' | 'collection'; targetId: string; targetName?: string; label?: string; expiresAt?: number; revokedAt?: number; hitCount: number; createdAt: number };
@@ -86,6 +88,8 @@ export function App() {
 }
 
 function OwnerApp({ path }: { path: string }) {
+  const authClient = useQueryClient();
+  const [notice, setNotice] = useState('');
   const [dark, setDark] = useState(() => {
     try { return localStorage.getItem('fileament-theme') === 'dark'; }
     catch { return false; }
@@ -95,10 +99,34 @@ function OwnerApp({ path }: { path: string }) {
     try { localStorage.setItem('fileament-theme', dark ? 'dark' : 'light'); }
     catch { /* Keep the current theme when browser storage is unavailable. */ }
   }, [dark]);
-  const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
+  const me = useQuery<Me>({ queryKey: ['me'], queryFn: ({ signal }) => api('/api/me', { signal }), retry: false, refetchInterval: 60_000 });
   if (me.isLoading) return <Shell><Empty text="Loading" /></Shell>;
+  if (me.isError && !me.data) return <Shell><p role="alert">Your session could not be checked. Try again.</p><button type="button" onClick={() => { void me.refetch(); }}>Retry session check</button></Shell>;
   if (me.data?.setupRequired) return <AuthScreen key="setup" mode="setup" />;
   if (!me.data?.authenticated) return <AuthScreen key="login" mode="login" />;
+  const end = () => {
+    setNotice('');
+    void authClient.cancelQueries({ queryKey: ['me'] });
+    authClient.setQueryData<Me>(['me'], { authenticated: false, setupRequired: false });
+    void authClient.invalidateQueries({ queryKey: ['me'] });
+  };
+  const refresh = (message = '') => {
+    setNotice(message);
+    void authClient.invalidateQueries({ queryKey: ['me'] });
+  };
+  return <OwnerSession key={me.data.context ?? 'owner'} context={me.data.context} onEnd={end} onRefresh={refresh}>
+    <OwnerPages path={path} dark={dark} onToggleTheme={() => setDark(!dark)} notice={notice} />
+  </OwnerSession>;
+}
+
+function OwnerSession({ context, onEnd, onRefresh, children }: { context?: string; onEnd: () => void; onRefresh: (message?: string) => void; children: ReactNode }) {
+  const parent = useQueryClient();
+  const [session] = useState(() => createOwnerSession(parent.getDefaultOptions(), onEnd, onRefresh, context));
+  useEffect(() => session.mount(), [session]);
+  return <OwnerSessionContext.Provider value={session}><QueryClientProvider client={session.client}>{children}</QueryClientProvider></OwnerSessionContext.Provider>;
+}
+
+function OwnerPages({ path, dark, onToggleTheme, notice }: { path: string; dark: boolean; onToggleTheme: () => void; notice: string }) {
   return (
     <Shell>
       <nav className="topbar">
@@ -108,9 +136,10 @@ function OwnerApp({ path }: { path: string }) {
           <a className={path.startsWith('/collections') ? 'active' : undefined} aria-current={path.startsWith('/collections') ? 'page' : undefined} href="/collections"><Folder size={18} />Collections</a>
           <a className={path === '/settings' ? 'active' : undefined} aria-current={path === '/settings' ? 'page' : undefined} href="/settings"><Settings size={18} />Settings</a>
           <a className="icon" href="https://github.com/TechHutTV/fileament" target="_blank" rel="noreferrer" title="View Fileament on GitHub" aria-label="View Fileament on GitHub"><Github size={20} /></a>
-          <button type="button" className="icon" onClick={() => setDark(!dark)} title="Toggle dark mode" aria-label="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
+          <button type="button" className="icon" onClick={onToggleTheme} title="Toggle dark mode" aria-label="Toggle dark mode">{dark ? <Sun /> : <Moon />}</button>
         </div>
       </nav>
+      {notice && <p className="success" role="status">{notice}</p>}
       {path.startsWith('/models/') ? <Detail key={path.split('/')[2]} id={path.split('/')[2]} /> : path.startsWith('/collections/') ? <CollectionDetail slug={path.split('/')[2]} /> : path === '/collections' ? <CollectionsPage /> : path === '/upload' ? <UploadPage /> : path === '/settings' ? <SettingsPage /> : <Catalog />}
     </Shell>
   );
@@ -150,6 +179,7 @@ function AuthScreen({ mode }: { mode: 'setup' | 'login' }) {
 }
 
 function Catalog() {
+  const api = useOwnerAPI();
   useThumbnailQueryRefresh();
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
@@ -206,6 +236,7 @@ function ModelCard({ model }: { model: ModelSummary }) {
 }
 
 function Detail({ id }: { id: string }) {
+  const api = useOwnerAPI();
   useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const { data: model, isLoading, isError } = useQuery<Model>({
@@ -348,6 +379,7 @@ function uploadStatusForModel(model: Model): UploadStatus {
 }
 
 function RetryThumbnailButton({ model, onUpdate }: { model: Model; onUpdate: (model: Model) => void }) {
+  const api = useOwnerAPI();
   const retry = useMutation({
     mutationFn: async () => {
       await api(`/api/models/${model.id}/thumbnails/retry`, { method: 'POST', body: '{}' });
@@ -359,6 +391,7 @@ function RetryThumbnailButton({ model, onUpdate }: { model: Model; onUpdate: (mo
 }
 
 function UploadPage() {
+  const api = useOwnerAPI();
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
   const itemsRef = useRef(items);
@@ -582,7 +615,7 @@ function UploadPage() {
       }));
     }, 15_000, () => itemsRef.current.flatMap((item) => item.model && (item.status === 'processing' || item.model.thumbnailJobs?.some((job) => job.status === 'pending' || job.status === 'running')) ? [item.model.id] : []));
     return () => { unsubscribe(); controller.abort(); };
-  }, [qc]);
+  }, [api, qc]);
 
   useEffect(() => () => { pending.current.forEach((key) => cancelled.current.add(key)); }, []);
 
@@ -674,6 +707,8 @@ function UploadPage() {
 }
 
 function SettingsPage() {
+  const session = useOwnerSession();
+  const api = session.api;
   const qc = useQueryClient();
   const { data, isError: storageError } = useQuery<{ totalBytes: number; diskBytes?: number | null; libraryBytes?: number; thumbnailBytes?: number; databaseBytes?: number; backupBytes?: number; workspaceBytes?: number; otherBytes?: number }>({ queryKey: ['storage'], queryFn: () => api('/api/storage') });
   const { data: shares, isLoading: sharesLoading, isError: sharesError } = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
@@ -693,7 +728,7 @@ function SettingsPage() {
   const [inspection, setInspection] = useState<BackupInspection | null>(null);
   const [confirmation, setConfirmation] = useState('');
   const chooseModelColor = (color: string) => setModelColor(saveModelColor(color));
-  const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); } });
+  const change = useMutation({ mutationFn: () => api('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }), onSuccess: () => { setCurrentPassword(''); setNewPassword(''); session.refresh('Password updated.'); } });
   const backup = useMutation<{ downloadUrl: string; filename: string; expiresAt: number; sizeBytes: number }, Error>({
     mutationFn: () => api('/api/backups/prepare', { method: 'POST' }),
     onMutate: () => setBackupExpired(false),
@@ -710,7 +745,7 @@ function SettingsPage() {
   });
   const restore = useMutation({
     mutationFn: () => api('/api/backups/restore', { method: 'POST', body: JSON.stringify({ restoreToken: inspection?.restoreToken, confirmation }) }),
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ['me'] }); },
+    onSuccess: () => session.end(),
   });
   return <section className="content narrow settings-page">
     <PageHeader eyebrow="Owner controls" title="Settings" description="Manage appearance, storage, account security, and public access to your library." />
@@ -752,7 +787,7 @@ function SettingsPage() {
     </section>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Lock size={19} />} title="Security" description="Update the password used to access this private library." />
-      <form className="stack settings-form" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><small className="field-help">Use at least 12 characters.</small><button type="submit" disabled={change.isPending}>{change.isPending ? 'Updating password' : 'Change password'}</button>{change.isError && <p className="error">Password change failed</p>}{change.isSuccess && <p className="success">Password updated.</p>}</form>
+      <form className="stack settings-form" onSubmit={(e) => { e.preventDefault(); change.mutate(); }}><label>Current password<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label><label>New password<input type="password" minLength={12} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></label><small className="field-help">Use at least 12 characters.</small><button type="submit" disabled={change.isPending}>{change.isPending ? 'Updating password' : 'Change password'}</button>{change.isError && <p className="error">Password change failed</p>}</form>
     </section>
     <section className="surface-card settings-card">
       <SectionHeading icon={<Link2 size={19} />} title="Share links" description="Review, copy, and revoke public links created for models and collections." />
@@ -766,6 +801,7 @@ function SettingsPage() {
 }
 
 function CollectionsPage() {
+  const api = useOwnerAPI();
   useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
@@ -784,6 +820,7 @@ function CollectionsPage() {
 }
 
 function CollectionDetail({ slug }: { slug: string }) {
+  const api = useOwnerAPI();
   useThumbnailQueryRefresh();
   const qc = useQueryClient();
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
@@ -902,6 +939,7 @@ function PublicModel({ model, token }: { model: Model; token: string }) {
 }
 
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {
+  const api = useOwnerAPI();
   const qc = useQueryClient();
   const [collectionToLeave, setCollectionToLeave] = useState<Collection | null>(null);
   const mutate = useMutation({ mutationFn: ({ collectionID, has }: { collectionID: string; has: boolean }) => api(`/api/collections/${collectionID}/models/${model.id}`, { method: has ? 'DELETE' : 'PUT' }), onSuccess: () => { setCollectionToLeave(null); qc.invalidateQueries({ queryKey: ['collections'] }); } });
@@ -986,6 +1024,7 @@ async function copyText(value: string) {
 }
 
 function UploadInline({ label, path, onDone }: { label: string; path: string; onDone: (value: unknown) => void }) {
+  const api = useOwnerAPI();
   const [file, setFile] = useState<File | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const mutation = useMutation({ mutationFn: async () => { if (!file) return null; const fd = new FormData(); fd.append('file', file); return api(path, { method: 'POST', body: fd }); }, onSuccess: (value) => { setFile(null); if (input.current) input.current.value = ''; onDone(value); } });
@@ -1139,14 +1178,6 @@ function useDebounced(value: string, ms: number) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => { const t = window.setTimeout(() => setDebounced(value), ms); return () => window.clearTimeout(t); }, [value, ms]);
   return debounced;
-}
-
-async function api(path: string, init: RequestInit = {}) {
-  const headers = init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init.headers };
-  const res = await fetch(path, { credentials: 'include', ...init, headers });
-  const body = await res.text();
-  if (!res.ok) throw new Error(body);
-  return body ? JSON.parse(body) : null;
 }
 
 function navigate(path: string, replace = false) {

@@ -1,10 +1,10 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from './App';
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); focusManager.setFocused(undefined); });
 
 const model = { id: 'm1', title: 'Part', description: 'Original notes', sourceUrl: '', license: '', author: '', tags: ['tools'], totalBytes: 0, files: [], images: [] };
 const collection = { id: 'c1', slug: 'parts', name: 'Parts', description: 'Original description', coverModelId: '', modelCount: 0, models: [] };
@@ -60,11 +60,11 @@ test('collection refresh merges clean fields without replacing an unsaved name',
     if (path === '/api/collections/parts') return Response.json(current);
     return Response.json([]);
   }));
-  const client = renderPage('/collections/parts');
+  renderPage('/collections/parts');
   const name = await screen.findByLabelText('Collection name');
   fireEvent.change(name, { target: { value: 'Unsaved collection' } });
   current = { ...current, name: 'Remote name', description: 'Remote description' };
-  await act(async () => { await client.refetchQueries({ queryKey: ['collection', 'parts'] }); });
+  await act(async () => { focusManager.setFocused(false); focusManager.setFocused(true); });
   await waitFor(() => expect(screen.getByLabelText('Collection description')).toHaveValue('Remote description'));
   expect(name).toHaveValue('Unsaved collection');
 });
@@ -174,9 +174,9 @@ test('a stale model response cannot overwrite the acknowledged save', async () =
     }
     return Response.json([]);
   }));
-  const client = renderPage('/models/m1');
+  renderPage('/models/m1');
   const title = await screen.findByLabelText('Title');
-  void client.refetchQueries({ queryKey: ['model', 'm1'] });
+  await act(async () => { focusManager.setFocused(false); focusManager.setFocused(true); });
   await waitFor(() => expect(stale).toBeDefined());
   fireEvent.change(title, { target: { value: '  Normalized title  ' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -195,9 +195,10 @@ test('an earlier collection save cannot redirect a later navigation or copy its 
     if (init?.method === 'PATCH') return new Promise<Response>((resolve) => { finish = resolve; });
     if (path === '/api/collections/parts') return Response.json(collection);
     if (path === '/api/collections/other') return Response.json(other);
+    if (path === '/api/collections/renamed') return new Promise<Response>(() => {});
     return Response.json([]);
   }));
-  const client = renderPage('/collections/parts');
+  renderPage('/collections/parts');
   fireEvent.change(await screen.findByLabelText('Collection name'), { target: { value: 'Renamed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save collection' }));
   await screen.findByRole('button', { name: 'Saving collection…' });
@@ -209,5 +210,11 @@ test('an earlier collection save cannot redirect a later navigation or copy its 
   await act(async () => { finish?.(Response.json({ ...collection, name: 'Renamed', slug: 'renamed' })); });
   expect(window.location.pathname).toBe('/collections/other');
   expect(screen.getByLabelText('Collection name')).toHaveValue('Other collection');
-  expect(client.getQueryData(['collection', 'renamed'])).toMatchObject({ pages: [{ id: 'c1', models: [] }] });
+  await act(async () => {
+    window.history.pushState({}, '', '/collections/renamed');
+    window.dispatchEvent(new Event('fileament:navigate'));
+  });
+  expect(await screen.findByDisplayValue('Renamed')).toBeInTheDocument();
+  expect(screen.getByText('0 of 0 models shown')).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: /Other member/ })).not.toBeInTheDocument();
 });

@@ -110,6 +110,8 @@ New owner passwords must contain at least 12 characters, counted as Unicode code
 
 Changing the password revokes every existing session and keeps the current browser signed in with a new cookie. Other browsers must sign in again. Password changes and logout close existing event streams, which reconnect only with a valid session. Streams also recheck authorization before sending events and once per minute while idle. Expired sessions are pruned at startup and at most once per hour during authenticated traffic.
 
+Owner pages check the current login every minute while visible, on returning to the page, and after reconnecting. A confirmed sign-out or replacement login clears private query data, pending requests, and the open viewer, including manual large-model loading approval. A successful restore clears this state immediately, before the next login check finishes. Temporary failures to check an already verified session preserve the current page and unsaved edits until a later check succeeds.
+
 ## Using Fileament
 
 ### Upload models
@@ -259,6 +261,10 @@ Only explicit share links are public. Owner pages and model assets require an au
 ## Catalog and collection API
 
 Owner endpoints require a session cookie. List responses contain card summaries: `id`, `title`, optional `primaryThumb`, `totalBytes`, `createdAt`, `updatedAt`, and `files`. A summary's `files` array contains only the first variant's `format` and `triangleCount`, or is empty. Descriptions, tags, images, and complete variant metadata are returned by model detail endpoints.
+
+`GET /api/me` returns `authenticated` and `setupRequired`, plus an opaque `context` identifier only for a valid owner login. The identifier changes when the login is replaced, allowing clients to discard state from the previous session. It is not a credential and cannot authorize requests; the session cookie remains required.
+
+The web app sends that identifier in `X-Fileament-Context` on owner API requests. When supplied, it must match the current session or the server returns `401`, preventing a stale page from applying changes after its cookie has been replaced. Existing clients can continue using cookie authentication without this optional header.
 
 | Endpoint | Response and pagination |
 | --- | --- |

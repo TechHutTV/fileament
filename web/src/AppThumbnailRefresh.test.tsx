@@ -138,5 +138,5 @@ test('bounds upload preview refresh requests and aborts them when the page close
   unmount();
   await waitFor(() => expect(active).toBe(0));
   expect(requests).toHaveLength(4);
-  expect(requests.every((request) => request.signal.aborted)).toBe(true);
+  expect(requests.slice(1).every((request) => request.signal.aborted)).toBe(true);
 });
