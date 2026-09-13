@@ -147,7 +147,7 @@ def create_catalog(client):
         'Content-Type: application/octet-stream\r\n\r\n'
     ).encode() + mesh + f"\r\n--{boundary}--\r\n".encode()
     status, _, body = client.request("/api/models", "POST", upload, **{"Content-Type": f"multipart/form-data; boundary={boundary}"})
-    assert status == 201, f"mesh upload failed: {status}"
+    assert status == 201, f"mesh upload failed: {status}: {json.loads(body).get('error', 'no diagnostic')}"
     model_id = json.loads(body)["id"]
     client.json(f"/api/models/{model_id}", "PATCH", {"title": "Persistent smoke model", "tags": ["smoke"]})
     collection = client.json("/api/collections", "POST", {"name": "Smoke collection"}, expected=201)
