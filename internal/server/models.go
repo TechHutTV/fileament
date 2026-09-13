@@ -88,12 +88,13 @@ func (a *App) mountModelRoutes(r chi.Router) {
 }
 
 func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
-	limit := parseLimit(r.URL.Query().Get("limit"), 24)
-	cursor := r.URL.Query().Get("cursor")
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
-	collection := strings.TrimSpace(r.URL.Query().Get("collection"))
-	sortKey := strings.TrimSpace(r.URL.Query().Get("sort"))
+	query := r.URL.Query()
+	limit := parseLimit(query.Get("limit"), 24)
+	cursor := query.Get("cursor")
+	q := strings.TrimSpace(query.Get("q"))
+	tag := strings.TrimSpace(query.Get("tag"))
+	collection := strings.TrimSpace(query.Get("collection"))
+	sortKey := strings.TrimSpace(query.Get("sort"))
 	if sortKey == "" {
 		sortKey = "created"
 	}
@@ -111,13 +112,11 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if tag != "" {
-		join += " JOIN model_tags mt ON mt.model_id = models.id JOIN tags tg ON tg.id = mt.tag_id"
-		where = append(where, "tg.slug = ?")
+		where = append(where, "models.id IN (SELECT mt.model_id FROM model_tags mt JOIN tags tg ON tg.id = mt.tag_id WHERE tg.slug = ?)")
 		args = append(args, tag)
 	}
 	if collection != "" {
-		join += " JOIN collection_models cm ON cm.model_id = models.id JOIN collections c ON c.id = cm.collection_id"
-		where = append(where, "(c.id = ? OR c.slug = ?)")
+		where = append(where, "models.id IN (SELECT cm.model_id FROM collection_models cm JOIN collections c ON c.id = cm.collection_id WHERE c.id = ? OR c.slug = ?)")
 		args = append(args, collection, collection)
 	}
 	order := "models.created_at DESC, models.id DESC"
@@ -170,35 +169,16 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args = append(args, limit+1)
-	rows, err := a.db.Query(`SELECT DISTINCT models.id FROM models`+join+` WHERE `+strings.Join(where, " AND ")+` ORDER BY `+order+` LIMIT ?`, args...)
+	items, err := a.queryModelSummaries(r.Context(), join, strings.Join(where, " AND "), order, "0", args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		ids = append(ids, id)
-	}
 	next := ""
-	if len(ids) > limit {
-		ids = ids[:limit]
-		last, _ := a.getModel(ids[len(ids)-1])
-		next = encodeCursor(sortKey, last)
-	}
-	items := make([]Model, 0, len(ids))
-	for _, id := range ids {
-		m, err := a.getModel(id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		items = append(items, m)
+	if len(items) > limit {
+		items = items[:limit]
+		last := items[len(items)-1]
+		next = encodeCursor(sortKey, Model{ID: last.ID, Title: last.Title, CreatedAt: last.CreatedAt, UpdatedAt: last.UpdatedAt, TotalBytes: last.TotalBytes})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": next})
 }
@@ -1317,7 +1297,7 @@ func (a *App) getModel(id string) (Model, error) {
 	if err != nil {
 		return m, err
 	}
-	rows, err := a.db.Query(`SELECT id,filename,rel_path,format,size_bytes,sha256,COALESCE(triangle_count,0),COALESCE(bbox_x,0),COALESCE(bbox_y,0),COALESCE(bbox_z,0),COALESCE(thumb_path,''),sort_order FROM files WHERE model_id = ? ORDER BY sort_order, filename`, id)
+	rows, err := a.db.Query(`SELECT id,filename,rel_path,format,size_bytes,sha256,COALESCE(triangle_count,0),COALESCE(bbox_x,0),COALESCE(bbox_y,0),COALESCE(bbox_z,0),COALESCE(thumb_path,''),sort_order FROM files WHERE model_id = ? ORDER BY sort_order, filename, id`, id)
 	if err != nil {
 		return m, err
 	}

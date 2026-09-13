@@ -121,15 +121,15 @@ func TestCollectionsExposeMembershipOrderingAndCover(t *testing.T) {
 		}
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/collections", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/collections?model="+first.ID, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	app.Router().ServeHTTP(rec, req)
-	var collections []Collection
+	var collections []collectionSummary
 	if err := json.Unmarshal(rec.Body.Bytes(), &collections); err != nil {
 		t.Fatal(err)
 	}
-	if len(collections) != 1 || len(collections[0].ModelIDs) != 2 {
+	if len(collections) != 1 || collections[0].ModelCount != 2 || !collections[0].ContainsModel || len(collections[0].ModelIDs) != 0 {
 		t.Fatalf("collection membership missing from list: %#v", collections)
 	}
 

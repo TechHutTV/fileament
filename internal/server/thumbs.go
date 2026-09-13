@@ -318,7 +318,7 @@ func (a *App) claimThumbnailJob(ctx context.Context) (string, string, error) {
 	}
 	defer tx.Rollback()
 	var jobID, fileID string
-	err = tx.QueryRow(`SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at LIMIT 1`).Scan(&jobID, &fileID)
+	err = tx.QueryRow(`SELECT id, file_id FROM jobs WHERE type = 'thumbnail' AND status = 'pending' ORDER BY created_at, id LIMIT 1`).Scan(&jobID, &fileID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}

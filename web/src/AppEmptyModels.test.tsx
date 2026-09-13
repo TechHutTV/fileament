@@ -8,7 +8,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 test.each(['/', '/models/m1', '/collections/fixtures', '/s/model-token', '/s/collection-token'])('empty model remains usable at %s', async (path) => {
   const model = { id: 'm1', title: 'Empty model', description: 'Saved metadata', totalBytes: 0, files: [] };
-  const collection = { id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', modelIds: ['m1'], models: [model] };
+  const collection = { id: 'c1', name: 'Fixtures', slug: 'fixtures', description: '', modelCount: 1, modelIds: ['m1'], models: [model] };
   window.history.pushState({}, '', path);
   vi.stubGlobal('EventSource', class { addEventListener = vi.fn(); close = vi.fn(); });
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -17,10 +17,10 @@ test.each(['/', '/models/m1', '/collections/fixtures', '/s/model-token', '/s/col
     if (url === '/api/models/m1') return Response.json(model);
     if (url.startsWith('/api/models?')) return Response.json({ items: [model], nextCursor: '' });
     if (url === '/api/collections/fixtures') return Response.json(collection);
-    if (url === '/api/collections') return Response.json([collection]);
+    if (url.startsWith('/api/collections?') || url === '/api/collections') return Response.json([collection]);
     if (url.endsWith('/status')) return new Response(null, { status: 204 });
     if (url === '/api/public/model-token') return Response.json({ model, share: {} });
-    if (url === '/api/public/collection-token') return Response.json({ collection, share: {} });
+    if (url === '/api/public/collection-token') return Response.json({ model, collection, share: {} });
     return Response.json([]);
   }));
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><App /></QueryClientProvider>);
