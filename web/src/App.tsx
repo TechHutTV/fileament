@@ -248,7 +248,7 @@ function Detail({ id }: { id: string }) {
   const collections = useQuery<Collection[]>({ queryKey: ['collections', id], queryFn: () => api(`/api/collections?model=${encodeURIComponent(id)}`) });
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const [selectedFileID, setSelectedFileID] = useState('');
-  const [forceViewer, setForceViewer] = useState(false);
+  const [approvedFileID, setApprovedFileID] = useState('');
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   useEffect(() => { if (model?.files?.[0] && !selectedFileID) setSelectedFileID(model.files[0].id); }, [model, selectedFileID]);
   const file = model?.files.find((f) => f.id === selectedFileID) ?? model?.files?.[0];
@@ -282,12 +282,12 @@ function Detail({ id }: { id: string }) {
   return (
     <section className="detail">
       <div className="viewer">
-        {file && (canAutoLoad || forceViewer) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer key={file.id} file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{previewThumb ? <img src={`/thumbs/${model.id}/${previewThumb}`} alt={`${file?.filename ?? model.title} preview`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
+        {file && (canAutoLoad || approvedFileID === file.id) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer key={file.id} file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{previewThumb ? <img src={`/thumbs/${model.id}/${previewThumb}`} alt={`${file?.filename ?? model.title} preview`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setApprovedFileID(file.id)}>Load 3D view</button>}</div>}
       </div>
       <aside className="panel">
         {file && <div className="selected-variant-actions" role="group" aria-label="Selected variant">
           <a className="model-download-primary" href={`/files/${model.id}/${file.id}`} download={file.filename}><span className="model-download-icon"><Download size={22} /></span><span className="model-download-copy"><strong>Download {file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></a>
-          {model.files.length > 1 && <VariantPicker files={model.files} selectedFileID={file.id} onSelect={(fileID) => { setSelectedFileID(fileID); setForceViewer(false); }} thumbnailURL={(variant) => { const thumb = fileThumbName(variant); return thumb ? `/thumbs/${model.id}/${thumb}` : ''; }} />}
+          {model.files.length > 1 && <VariantPicker files={model.files} selectedFileID={file.id} onSelect={(fileID) => { setSelectedFileID(fileID); setApprovedFileID(''); }} thumbnailURL={(variant) => { const thumb = fileThumbName(variant); return thumb ? `/thumbs/${model.id}/${thumb}` : ''; }} />}
         </div>}
         <ModelEditor key={model.id} model={model} onSave={(body) => patch.mutateAsync(body)} />
         <Markdown text={model.description} />
