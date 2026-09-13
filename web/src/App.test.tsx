@@ -508,7 +508,7 @@ test('keeps a cancelled upload visible when server cleanup fails', async () => {
   expect(screen.getByText('delayed.stl')).toBeInTheDocument();
 });
 
-test('cleans up active uploads and skips queued uploads after unmount', async () => {
+test('cleans up active uploads and skips queued uploads after leaving the upload page', async () => {
   window.history.pushState({}, '', '/upload');
   const finish = new Map<string, () => void>();
   const uploads: string[] = [];
@@ -516,6 +516,7 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes('/api/me')) return Response.json({ authenticated: true, setupRequired: false });
+    if (url === '/api/collections') return Response.json([]);
     if (url === '/api/models' && init?.method === 'POST') {
       const file = (init.body as FormData).get('file') as File;
       uploads.push(file.name);
@@ -529,14 +530,14 @@ test('cleans up active uploads and skips queued uploads after unmount', async ()
     }
     return Response.json({});
   }));
-  const view = renderApp();
+  renderApp();
 
   await chooseSeparateModels();
   const dropzone = await screen.findByRole('button', { name: /drop 3d files/i });
   const files = ['active-a.stl', 'active-b.stl', 'active-c.stl', 'queued.stl'].map((name) => new File([name], name));
   fireEvent.drop(dropzone, { dataTransfer: { files } });
   await waitFor(() => expect(uploads).toEqual(['active-a.stl', 'active-b.stl', 'active-c.stl']));
-  view.unmount();
+  await act(async () => { window.history.pushState({}, '', '/collections'); window.dispatchEvent(new Event('fileament:navigate')); });
   finish.get('active-a.stl')?.();
   finish.get('active-b.stl')?.();
   finish.get('active-c.stl')?.();
