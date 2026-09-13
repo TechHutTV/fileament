@@ -372,7 +372,9 @@ docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine
 
 `npm run build` creates the UI and gzip copies of its hashed JavaScript and CSS. Production builds embed both representations in the standalone executable. Generated frontend output is built when needed and must not be committed.
 
-CI also scans the backend with `govulncheck` v1.8.0. Keep the minimum Go version in `go.mod`, the production builder, and the CI images on a supported patch release from the [Go release history](https://go.dev/doc/devel/release). Builds with older toolchains are rejected rather than silently producing an executable with known standard-library vulnerabilities.
+CI runs the full Go race suite, bounded mesh parser fuzzing, and a production container smoke test. Release tags must pass the same validation before publication. See [validation and build dependencies](docs/ci.md) for permissions, scheduled advisory checks, and the pin-update process.
+
+CI also scans the backend with `govulncheck` v1.8.0. Keep the minimum Go version in `go.mod`, the production builder, and the CI toolchain on a supported patch release from the [Go release history](https://go.dev/doc/devel/release). Builds with older toolchains are rejected rather than silently producing an executable with known standard-library vulnerabilities.
 
 ## License
 

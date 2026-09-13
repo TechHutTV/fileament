@@ -28,7 +28,7 @@ python3 .github/scripts/prepare_release_notes.py \
   --validate-only
 ```
 
-The release workflow repeats this validation before building or publishing. A missing, incomplete, or unfinished versioned file fails the workflow.
+The release workflow repeats this validation before publishing. A missing, incomplete, or unfinished versioned file fails the workflow. The tag commit must also pass the shared application tests, race tests, bounded parser fuzzing, advisory scans, frontend gates, and production container smoke. Publication checks out that validated commit and rejects a remote tag that has moved or disappeared. See [validation and build dependencies](../../docs/ci.md).
 
 ## Patch releases (`vX.Y.Z`, `Z > 0`)
 
