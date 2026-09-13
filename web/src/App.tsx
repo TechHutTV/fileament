@@ -1,10 +1,11 @@
-import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { Box, Check, ChevronDown, Copy, Download, Eye, EyeOff, Folder, Github, HardDrive, Link2, Lock, Moon, Palette, Pencil, Plus, Search, Settings, Sun, Trash2, Upload, X } from 'lucide-react';
 import { Suspense, lazy, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
 import { ViewerBoundary } from './ViewerBoundary';
 import { subscribeThumbnailRefresh, useThumbnailQueryRefresh } from './thumbnailRefresh';
+import { useMetadataDraft } from './useMetadataDraft';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
@@ -221,7 +222,14 @@ function Detail({ id }: { id: string }) {
   const canAutoLoad = canAutoLoadViewer(file);
   const previewThumb = fileThumbName(file) || model?.primaryThumb;
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['model', id] }); qc.invalidateQueries({ queryKey: ['models'] }); qc.invalidateQueries({ queryKey: ['collections'] }); qc.invalidateQueries({ queryKey: ['storage'] }); };
-  const patch = useMutation({ mutationFn: (body: Partial<Model>) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: invalidate });
+  const patch = useMutation<Model, Error, Partial<Model>>({
+    mutationFn: (body) => api(`/api/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    onSuccess: async (updated) => {
+      await qc.cancelQueries({ queryKey: ['model', id] });
+      qc.setQueryData(['model', id], updated);
+      invalidate();
+    },
+  });
   const removeModel = useMutation({ mutationFn: () => api(`/api/models/${id}`, { method: 'DELETE' }), onSuccess: () => navigate('/') });
   const renameFile = useMutation<Model, Error, { fid: string; filename: string }>({
     mutationFn: ({ fid, filename }) => api(`/api/models/${id}/files/${fid}`, { method: 'PATCH', body: JSON.stringify({ filename }) }),
@@ -248,7 +256,7 @@ function Detail({ id }: { id: string }) {
           <a className="model-download-primary" href={`/files/${model.id}/${file.id}`} download={file.filename}><span className="model-download-icon"><Download size={22} /></span><span className="model-download-copy"><strong>Download {file.filename}</strong><small>{file.format.toUpperCase()} · {formatBytes(file.sizeBytes)}</small></span></a>
           {model.files.length > 1 && <VariantPicker files={model.files} selectedFileID={file.id} onSelect={(fileID) => { setSelectedFileID(fileID); setForceViewer(false); }} thumbnailURL={(variant) => { const thumb = fileThumbName(variant); return thumb ? `/thumbs/${model.id}/${thumb}` : ''; }} />}
         </div>}
-        <ModelEditor model={model} onSave={(body) => patch.mutate(body)} />
+        <ModelEditor key={model.id} model={model} onSave={(body) => patch.mutateAsync(body)} />
         <Markdown text={model.description} />
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
@@ -306,24 +314,31 @@ function ModelFileRow({ modelID, file, busy, onRename, onUseThumbnail, onDelete 
   return <div className={`file model-file${editing ? ' editing' : ''}`}><div className="model-file-copy">{editing ? <form className="model-file-rename" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="model-file-rename-field"><input autoFocus required maxLength={255 - extension.length} aria-label={`Variation name for ${file.filename}`} value={name} onChange={(event) => setName(event.target.value)} /><span className="model-file-extension">{extension}</span></div><div className="model-file-rename-actions"><button type="submit" className="icon" aria-label="Save variation name" title="Save" disabled={busy || !name.trim()}><Check size={16} /></button><button type="button" className="icon" aria-label="Cancel renaming" title="Cancel" disabled={busy} onClick={cancelEditing}><X size={16} /></button></div>{error && <p className="model-file-rename-error" role="alert">{error}</p>}</form> : <a href={`/files/${modelID}/${file.id}`}><Download size={16} /><span>{file.filename}</span></a>}<small>{file.triangleCount} tris · {dims(file)} · {formatBytes(file.sizeBytes)}</small></div>{!editing && <div className="model-file-actions"><button type="button" className="icon" aria-label={`Rename ${file.filename}`} title="Rename file" disabled={busy} onClick={startEditing}><Pencil size={16} /></button><button type="button" className="icon" title="Use thumbnail" disabled={busy} onClick={onUseThumbnail}><Check size={16} /></button><button type="button" className="icon danger" aria-label={`Delete ${file.filename}`} title="Delete file" disabled={busy} onClick={onDelete}><Trash2 size={16} /></button></div>}</div>;
 }
 
-function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<Model>) => void }) {
-  const [title, setTitle] = useState(model.title);
-  const [description, setDescription] = useState(model.description);
-  const [sourceUrl, setSourceUrl] = useState(model.sourceUrl ?? '');
-  const [license, setLicense] = useState(model.license ?? '');
-  const [author, setAuthor] = useState(model.author ?? '');
-  const [tags, setTags] = useState((model.tags ?? []).join(', '));
+function modelFields(model: Model) {
+  return { title: model.title, description: model.description, sourceUrl: model.sourceUrl ?? '', license: model.license ?? '', author: model.author ?? '', tags: (model.tags ?? []).join(', ') };
+}
+
+function ModelEditor({ model, onSave }: { model: Model; onSave: (body: Partial<Model>) => Promise<Model> }) {
+  const draft = useMetadataDraft(modelFields(model));
+  const { title, description, sourceUrl, license, author, tags } = draft.values;
   return (
-    <form className="stack" onSubmit={(e) => { e.preventDefault(); onSave({ title, description, sourceUrl, license, author, tags: tags.split(',').map((t) => t.trim()).filter(Boolean) }); }}>
-      <label>Title<input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
-      <label>Notes<textarea value={description} onChange={(e) => setDescription(e.target.value)} /></label>
-      <label>Source URL<input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} /></label>
-      <label>License<input value={license} onChange={(e) => setLicense(e.target.value)} /></label>
-      <label>Author<input value={author} onChange={(e) => setAuthor(e.target.value)} /></label>
-      <label>Tags<input value={tags} onChange={(e) => setTags(e.target.value)} /></label>
-      <button type="submit"><Check size={16} />Save changes</button>
+    <form className="stack" onSubmit={(e) => { e.preventDefault(); void draft.save(async (values) => modelFields(await onSave({ ...values, tags: values.tags.split(',').map((tag) => tag.trim()).filter(Boolean) }))); }}>
+      <label>Title<input value={title} onChange={(e) => draft.change('title', e.target.value)} /></label>
+      <label>Notes<textarea value={description} onChange={(e) => draft.change('description', e.target.value)} /></label>
+      <label>Source URL<input value={sourceUrl} onChange={(e) => draft.change('sourceUrl', e.target.value)} /></label>
+      <label>License<input value={license} onChange={(e) => draft.change('license', e.target.value)} /></label>
+      <label>Author<input value={author} onChange={(e) => draft.change('author', e.target.value)} /></label>
+      <label>Tags<input value={tags} onChange={(e) => draft.change('tags', e.target.value)} /></label>
+      <button type="submit" disabled={draft.status === 'saving'}><Check size={16} />{draft.status === 'saving' ? 'Saving changes…' : 'Save changes'}</button>
+      <MetadataSaveStatus status={draft.status} dirty={draft.dirty} />
     </form>
   );
+}
+
+function MetadataSaveStatus({ status, dirty, created = false }: { status: string; dirty: boolean; created?: boolean }) {
+  if (status === 'error') return <p className="error" role="alert">Could not save. Your edits are still here; try again.</p>;
+  if (status === 'saved') return <p className="success" role="status">{dirty ? 'Saved. You have unsaved changes.' : created ? 'Collection created.' : 'Changes saved.'}</p>;
+  return null;
 }
 
 function uploadStatusForModel(model: Model): UploadStatus {
@@ -753,14 +768,13 @@ function SettingsPage() {
 function CollectionsPage() {
   useThumbnailQueryRefresh();
   const qc = useQueryClient();
-  const [formVersion, setFormVersion] = useState(0);
   const { data, isLoading, isError } = useQuery<Collection[]>({ queryKey: ['collections'], queryFn: () => api('/api/collections') });
-  const create = useMutation({ mutationFn: (body: Partial<Collection>) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { setFormVersion((version) => version + 1); qc.invalidateQueries({ queryKey: ['collections'] }); } });
+  const create = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api('/api/collections', { method: 'POST', body: JSON.stringify(body) }), onSuccess: () => { qc.invalidateQueries({ queryKey: ['collections'] }); } });
   return <section className="content page-content collections-page">
     <PageHeader eyebrow="Organize your library" title="Collections" description="Group related models into focused sets for projects, printers, or workflows." />
     <section className="surface-card collection-create">
       <SectionHeading icon={<Folder size={19} />} title="Create a collection" description="Start a new group and add models from their detail pages." />
-      <CollectionForm key={formVersion} onSave={(body) => create.mutate(body)} />
+      <CollectionForm onSave={(body) => create.mutateAsync(body)} />
     </section>
     {isError && <Empty text="Collections could not be loaded" />}
     {isLoading && <Empty text="Loading collections" />}
@@ -782,7 +796,20 @@ function CollectionDetail({ slug }: { slug: string }) {
   const models = [...new Map((page.data?.pages.flatMap((p) => p.models ?? []) ?? []).map((m) => [m.id, m])).values()];
   const shares = useQuery<Share[]>({ queryKey: ['shares'], queryFn: () => api('/api/shares') });
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['collection', slug] }); qc.invalidateQueries({ queryKey: ['collections'] }); };
-  const patch = useMutation<Collection, Error, Partial<Collection>>({ mutationFn: (body) => api(`/api/collections/${data?.id}`, { method: 'PATCH', body: JSON.stringify(body) }), onSuccess: (updated) => { invalidate(); if (updated.slug !== slug) navigate(`/collections/${updated.slug}`, true); } });
+  const patch = useMutation<Collection, Error, { id: string; slug: string; body: Partial<Collection> }>({
+    mutationFn: ({ id, body }) => api(`/api/collections/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    onSuccess: async (updated, original) => {
+      await qc.cancelQueries({ queryKey: ['collection', original.slug] });
+      if (updated.slug !== original.slug) await qc.cancelQueries({ queryKey: ['collection', updated.slug] });
+      const current = qc.getQueryData<InfiniteData<Collection, string>>(['collection', original.slug]);
+      qc.setQueryData<InfiniteData<Collection, string>>(['collection', updated.slug], current ? {
+        ...current, pages: current.pages.map((page) => ({ ...page, name: updated.name, slug: updated.slug, description: updated.description, coverModelId: updated.coverModelId, coverThumb: updated.coverThumb })),
+      } : { pages: [updated], pageParams: [''] });
+      if (updated.slug !== original.slug && window.location.pathname === `/collections/${original.slug}`) navigate(`/collections/${updated.slug}`, true);
+      void qc.invalidateQueries({ queryKey: ['collection', updated.slug] });
+      void qc.invalidateQueries({ queryKey: ['collections'] });
+    },
+  });
   const reorder = useMutation({ mutationFn: (body: { modelId: string; direction: 'up' | 'down' }) => api(`/api/collections/${data?.id}/order`, { method: 'PUT', body: JSON.stringify(body) }), onSuccess: invalidate });
   const removeMember = useMutation({ mutationFn: (modelID: string) => api(`/api/collections/${data?.id}/models/${modelID}`, { method: 'DELETE' }), onSuccess: () => { setConfirmation(null); invalidate(); } });
   const remove = useMutation({ mutationFn: () => api(`/api/collections/${data?.id}`, { method: 'DELETE' }), onSuccess: () => navigate('/collections') });
@@ -790,7 +817,7 @@ function CollectionDetail({ slug }: { slug: string }) {
   const resetRemovalState = () => { remove.reset(); removeMember.reset(); };
   if (!data) return <section className="content"><Empty text={page.isError ? 'Collection could not be loaded' : 'Loading collection'} /></section>;
   return <section className="content">
-    <CollectionForm collection={data} models={models} onSave={(body) => patch.mutate(body)} />
+    <CollectionForm key={data.id} collection={data} models={models} onSave={(body) => patch.mutateAsync({ id: data.id, slug, body })} />
     <div className="toolbar"><ShareForm onCreate={(body) => share.mutate(body)} /><button type="button" className="danger" onClick={() => { resetRemovalState(); setConfirmation({ title: 'Delete collection?', description: `Delete “${data.name}”? Its models stay in your library.`, confirmLabel: 'Delete collection', onConfirm: () => remove.mutate() }); }}><Trash2 size={16} />Delete collection</button></div>
     {shares.data?.filter((s) => s.scope === 'collection' && s.targetId === data.id && !s.revokedAt).map((s) => <ShareRow key={s.id} share={s} />)}
     <p>{models.length} of {data.modelCount} models shown</p>
@@ -881,12 +908,26 @@ function CollectionMembership({ collections, model }: { collections: Collection[
   return <div className="checks">{collections.map((c) => { const has = c.containsModel ?? false; return <label key={c.id}><input type="checkbox" checked={has} onChange={() => { mutate.reset(); if (has) setCollectionToLeave(c); else mutate.mutate({ collectionID: c.id, has: false }); }} />{c.name}</label>; })}<ConfirmationDialog request={collectionToLeave ? { title: 'Remove from collection?', description: `Remove “${model.title}” from “${collectionToLeave.name}”? The model stays in your library.`, confirmLabel: 'Remove from collection', onConfirm: () => mutate.mutate({ collectionID: collectionToLeave.id, has: true }) } : null} busy={mutate.isPending} error={mutate.isError ? 'The model could not be removed from this collection. Try again.' : undefined} onCancel={() => setCollectionToLeave(null)} /></div>;
 }
 
-function CollectionForm({ collection, models = collection?.models ?? [], onSave }: { collection?: Collection; models?: ModelSummary[]; onSave: (body: Partial<Collection>) => void }) {
-  const [name, setName] = useState(collection?.name ?? '');
-  const [description, setDescription] = useState(collection?.description ?? '');
-  const [coverModelId, setCoverModelId] = useState(collection?.coverModelId ?? '');
-  useEffect(() => { setName(collection?.name ?? ''); setDescription(collection?.description ?? ''); setCoverModelId(collection?.coverModelId ?? ''); }, [collection?.id, collection?.name, collection?.description, collection?.coverModelId]);
-  return <form className="stack inline-form" onSubmit={(e) => { e.preventDefault(); onSave({ name, description, coverModelId }); }}><label>{collection ? 'Collection name' : 'Name'}<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>{collection ? 'Collection description' : 'Description'}<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>{collection && <label>Cover model<select value={coverModelId} onChange={(e) => setCoverModelId(e.target.value)}><option value="">Automatic</option>{coverModelId && !models.some((model) => model.id === coverModelId) && <option value={coverModelId}>Current cover</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.title}</option>)}</select></label>}<button type="submit"><Plus size={16} />{collection ? 'Save collection' : 'Create collection'}</button></form>;
+function collectionFields(collection?: Collection) {
+  return { name: collection?.name ?? '', description: collection?.description ?? '', coverModelId: collection?.coverModelId ?? '' };
+}
+
+function CollectionForm({ collection, models = collection?.models ?? [], onSave }: { collection?: Collection; models?: ModelSummary[]; onSave: (body: Partial<Collection>) => Promise<Collection> }) {
+  const draft = useMetadataDraft(collectionFields(collection));
+  const { name, description, coverModelId } = draft.values;
+  return <form className="stack inline-form" onSubmit={(e) => {
+    e.preventDefault();
+    void draft.save(async (values) => {
+      const saved = await onSave(values);
+      return collectionFields(collection ? saved : undefined);
+    });
+  }}>
+    <label>{collection ? 'Collection name' : 'Name'}<input value={name} onChange={(e) => draft.change('name', e.target.value)} /></label>
+    <label>{collection ? 'Collection description' : 'Description'}<input value={description} onChange={(e) => draft.change('description', e.target.value)} /></label>
+    {collection && <label>Cover model<select value={coverModelId} onChange={(e) => draft.change('coverModelId', e.target.value)}><option value="">Automatic</option>{coverModelId && !models.some((model) => model.id === coverModelId) && <option value={coverModelId}>Current cover</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.title}</option>)}</select></label>}
+    <button type="submit" disabled={draft.status === 'saving'}><Plus size={16} />{draft.status === 'saving' ? collection ? 'Saving collection…' : 'Creating collection…' : collection ? 'Save collection' : 'Create collection'}</button>
+    <MetadataSaveStatus status={draft.status} dirty={draft.dirty} created={!collection} />
+  </form>;
 }
 
 function ShareForm({ onCreate }: { onCreate: (body: { label: string; expiresAt: number }) => void }) {

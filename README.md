@@ -136,6 +136,8 @@ The upload screen and owner model page show preview failures separately from upl
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
+Model and collection forms show when a save is pending, succeeds, or fails. You can keep editing during a save; newer edits remain in the form for your next save. Background refreshes update untouched fields without replacing your edits, and failed saves preserve the draft so you can retry. Creating a collection clears the submitted fields while keeping any newer edits for the next collection.
+
 Catalog and collection cards load summaries. Use **Load more models** to browse larger collections; ordering controls work across page boundaries. The cover selector includes loaded members and preserves the current cover when it is on another page.
 
 Tags with the same normalized slug share the existing label. Reusing a tag does not rename it on other models.
