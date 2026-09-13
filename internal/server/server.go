@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,15 +111,38 @@ func (a *App) Router() http.Handler {
 	return r
 }
 
-func openDatabase(dataDir string) (*sql.DB, error) {
-	dbPath := filepath.ToSlash(filepath.Join(dataDir, "fileament.db"))
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+func openSQLite(path string, query url.Values) (*sql.DB, error) {
+	dbPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(dbPath)}
+	u.RawQuery = query.Encode()
+	return sql.Open("sqlite", u.String())
+}
+
+func openDatabase(dataDir string) (*sql.DB, error) {
+	db, err := openSQLite(filepath.Join(dataDir, "fileament.db"), url.Values{
+		"_pragma": {"foreign_keys(ON)", "busy_timeout(5000)", "synchronous(FULL)"},
+		"_txlock": {"immediate"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	var mode string
+	if err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable SQLite WAL: %w", err)
+	}
+	if mode != "wal" {
+		_ = db.Close()
+		return nil, errors.New("SQLite WAL mode is unavailable")
 	}
 	if err := migrate(db); err != nil {
 		_ = db.Close()
@@ -146,7 +170,7 @@ func (a *App) initializeData() error {
 	if err := a.recoverThumbnailJobs(); err != nil {
 		return err
 	}
-	return a.pruneExpiredSessions(time.Now())
+	return a.pruneExpiredSessions(context.Background(), time.Now())
 }
 
 func (a *App) maintenanceMiddleware(next http.Handler) http.Handler {
@@ -177,7 +201,7 @@ func (a *App) dataAccessMiddleware(next http.Handler) http.Handler {
 
 func (a *App) handleStorageStats(w http.ResponseWriter, r *http.Request) {
 	var total int64
-	_ = a.db.QueryRow(`SELECT COALESCE(SUM(total_bytes), 0) FROM models`).Scan(&total)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(total_bytes), 0) FROM models`).Scan(&total)
 	writeJSON(w, http.StatusOK, map[string]int64{"totalBytes": total})
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -27,8 +28,9 @@ func TestRejectedMeshUploadLeavesNoPartialModel(t *testing.T) {
 			req.AddCookie(loginCookie(t, app, "password-password"))
 			if canceled {
 				ctx, cancel := context.WithCancel(req.Context())
-				cancel()
+				defer cancel()
 				req = req.WithContext(ctx)
+				req.Body = cancelUploadBody{ReadCloser: req.Body, cancel: cancel}
 			}
 			rec := httptest.NewRecorder()
 			app.Router().ServeHTTP(rec, req)
@@ -49,6 +51,16 @@ func TestRejectedMeshUploadLeavesNoPartialModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+type cancelUploadBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b cancelUploadBody) Read(p []byte) (int, error) {
+	b.cancel()
+	return b.ReadCloser.Read(p)
 }
 
 func TestThumbnailAdmissionCancellationDoesNotClaimJob(t *testing.T) {

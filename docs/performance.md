@@ -47,3 +47,30 @@ At 100,000 models the measured path is about 12 times faster, with 89% less JSON
 Collection detail uses three queries for metadata, member count, and one page of cards, instead of hydrating every member. Pages default to 24 and are capped at 100. Public collection responses add only one complete selected model, with current token and membership checks. The owner collection list gets cover/count/membership summaries in one query, without transferring every member ID. Membership and share creation use existence/name queries rather than full model hydration.
 
 Collection reordering still reads member IDs and persists the complete order, and mutations still publish the complete durable collection sidecar. Those writes remain proportional to membership size. Snapshot/fsync cost and concurrent write throughput require separate measurements; the card benchmark does not measure them. Pagination tests cover tied positions, invalid/foreign cursors, cross-page moves, a single-connection pool, cancellation, backups, fresh-index reconstruction, and removal/revocation of public access.
+
+## SQLite concurrency
+
+The runtime uses four open/idle connections, WAL, `synchronous=FULL`, a five-second busy timeout, and immediate write transactions. Immediate transactions reserve the single SQLite writer before reading data to update, avoiding deferred read-to-write upgrade failures. Read-only transactions remain deferred. Each connection enables foreign keys; automatic WAL checkpoints retain SQLite's 1,000-page default. Model/collection publication still uses the existing mutation locks and recovery journal.
+
+The driver is `modernc.org/sqlite` 1.46.2, with SQLite 3.51.3. This includes the upstream [WAL-reset corruption fix](https://sqlite.org/releaselog/3_51_3.html); enabling WAL on the earlier bundled SQLite would be unsafe. WAL requires local filesystem shared-memory support. Full synchronization retains commit durability; it is not reduced to `NORMAL` to improve benchmark results.
+
+```sh
+go test ./internal/server -run '^$' -bench '^BenchmarkDatabaseConcurrency$' -benchtime=1000x -count=3 -cpu=8
+```
+
+The 1,000-model fixture above runs eight concurrent goroutines. Six of each eight operations read a 25-card page; one inserts a model/file/job transaction; one claims and completes a thumbnail job. It exercises the application's claim/completion queries and publication locks. It excludes payload parsing/rendering, sidecar snapshots, HTTP, and filesystem publication, so it measures database contention rather than end-to-end import throughput. Every configuration uses the patched driver and full synchronization.
+
+Median results from three runs on Apple M5/macOS arm64, Go 1.26.8, September 12, 2026:
+
+| Journal / maximum connections | Mixed operation time | Average read latency within median run | Failed operations per 1,000, range |
+| --- | --- | --- | --- |
+| DELETE / unlimited, deferred writes | 0.500 ms | 2.515 ms | 2–29 |
+| DELETE / 4, immediate writes | 0.403 ms | 1.081 ms | 0 |
+| WAL / 1, immediate writes | 0.114 ms | 0.468 ms | 0 |
+| WAL / 2, immediate writes | 0.118 ms | 0.331 ms | 0 |
+| WAL / 4, immediate writes | 0.148 ms | 0.246 ms | 0 |
+| WAL / 8, immediate writes | 0.174 ms | 0.119 ms | 0 |
+
+Four connections balance browsing latency, write throughput, and per-connection memory. A single connection has lower mixed-operation overhead in this short fixture but serializes readers behind writes. Eight improves reads further while increasing total time and connection cost. The unlimited baseline includes failed operations and cannot be treated as successful throughput. Rerun on the deployment's storage before drawing production latency conclusions.
+
+Request reads, authorization checks, direct handler transactions, and worker SQL use cancellation contexts. Recovery/finalization remains independent of a disconnected request so files and sidecars can still be made consistent. Restore closes and checkpoints the active database before recording the files to swap; rollback also removes journal files created by the replacement database. Tests cover concurrent read/modify/write transactions, reader snapshots during writes, pool saturation, expensive query cancellation and connection reuse, backup/restore, and recovery from an interrupted replacement with live WAL data.

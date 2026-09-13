@@ -129,10 +129,10 @@ func TestPasswordChangeRejectsPreviouslyVerifiedCredentials(t *testing.T) {
 	if rec := changeTestPassword(app, cookie); rec.Code != http.StatusNoContent {
 		t.Fatalf("password change status=%d", rec.Code)
 	}
-	if _, err := app.createOwnerSession(originalHash); !errors.Is(err, errSessionStateChanged) {
+	if _, err := app.createOwnerSession(context.Background(), originalHash); !errors.Is(err, errSessionStateChanged) {
 		t.Fatalf("stale login result=%v", err)
 	}
-	if _, err := app.rotateOwnerPassword(originalHash, originalHash, cookie.Value); !errors.Is(err, errSessionStateChanged) {
+	if _, err := app.rotateOwnerPassword(context.Background(), originalHash, originalHash, cookie.Value); !errors.Is(err, errSessionStateChanged) {
 		t.Fatalf("stale password change result=%v", err)
 	}
 	if countSessions(t, app) != 1 {
@@ -160,12 +160,12 @@ func TestConcurrentLoginCannotOutlivePasswordRotation(t *testing.T) {
 		go func() {
 			defer finished.Done()
 			<-start
-			loginSession, loginErr = app.createOwnerSession(originalHash)
+			loginSession, loginErr = app.createOwnerSession(context.Background(), originalHash)
 		}()
 		go func() {
 			defer finished.Done()
 			<-start
-			replacement, rotationErr = app.rotateOwnerPassword(originalHash, replacementHash, cookie.Value)
+			replacement, rotationErr = app.rotateOwnerPassword(context.Background(), originalHash, replacementHash, cookie.Value)
 		}()
 		close(start)
 		finished.Wait()
@@ -199,7 +199,7 @@ func TestPasswordRotationRequiresAnUnrevokedCurrentSession(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("logout status=%d", rec.Code)
 	}
-	if _, err := app.rotateOwnerPassword(originalHash, originalHash, cookie.Value); !errors.Is(err, errSessionStateChanged) {
+	if _, err := app.rotateOwnerPassword(context.Background(), originalHash, originalHash, cookie.Value); !errors.Is(err, errSessionStateChanged) {
 		t.Fatalf("revoked session rotation result=%v", err)
 	}
 }

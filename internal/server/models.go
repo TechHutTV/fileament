@@ -355,7 +355,7 @@ func uploadStatus(err error) int {
 }
 
 func (a *App) handleGetModel(w http.ResponseWriter, r *http.Request) {
-	m, err := a.getModel(chi.URLParam(r, "id"))
+	m, err := a.getModelContext(r.Context(), chi.URLParam(r, "id"))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -391,7 +391,7 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer finish()
-	m, err := a.getModel(id)
+	m, err := a.getModelContext(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -419,7 +419,7 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m, err = a.getModel(id)
+	m, err = a.getModelContext(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -443,11 +443,11 @@ func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer finish()
-	if _, err := a.getModel(id); err != nil {
+	if _, err := a.getModelContext(r.Context(), id); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	if _, err := a.db.Exec(`DELETE FROM models WHERE id = ?`, id); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM models WHERE id = ?`, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -506,7 +506,7 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer finish()
-	model, err := a.getModel(modelID)
+	model, err := a.getModelContext(r.Context(), modelID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -543,17 +543,17 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updatedAt := time.Now().Unix()
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE files SET filename = ? WHERE id = ? AND model_id = ?`, filename, fileID, modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `UPDATE files SET filename = ? WHERE id = ? AND model_id = ?`, filename, fileID, modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := tx.Exec(`UPDATE models SET updated_at = ? WHERE id = ?`, updatedAt, modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `UPDATE models SET updated_at = ? WHERE id = ?`, updatedAt, modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -561,7 +561,7 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	model, err = a.getModel(modelID)
+	model, err = a.getModelContext(r.Context(), modelID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -607,7 +607,7 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 	var rel, thumb sql.NullString
 	var primary string
 	var size int64
-	if err := a.db.QueryRow(`SELECT f.rel_path,f.size_bytes,f.thumb_path,COALESCE(m.primary_thumb,'') FROM files f JOIN models m ON m.id = f.model_id WHERE f.id = ? AND f.model_id = ?`, fileID, modelID).Scan(&rel, &size, &thumb, &primary); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT f.rel_path,f.size_bytes,f.thumb_path,COALESCE(m.primary_thumb,'') FROM files f JOIN models m ON m.id = f.model_id WHERE f.id = ? AND f.model_id = ?`, fileID, modelID).Scan(&rel, &size, &thumb, &primary); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -624,21 +624,21 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 	if clearPrimary && primary != "" && primary == filepath.Base(primary) {
 		primaryPath, _ = containedName(filepath.Join(root, "thumbs"), primary)
 	}
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM files WHERE id = ? AND model_id = ?`, fileID, modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM files WHERE id = ? AND model_id = ?`, fileID, modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := tx.Exec(`DELETE FROM jobs WHERE file_id = ?`, fileID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM jobs WHERE file_id = ?`, fileID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), primary_thumb = CASE WHEN ? THEN '' ELSE primary_thumb END, updated_at = ? WHERE id = ?`, size, clearPrimary, time.Now().Unix(), modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), primary_thumb = CASE WHEN ? THEN '' ELSE primary_thumb END, updated_at = ? WHERE id = ?`, size, clearPrimary, time.Now().Unix(), modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -670,7 +670,7 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m, err := a.getModel(modelID)
+	m, err := a.getModelContext(r.Context(), modelID)
 	if err == nil {
 		err = a.writeSidecar(m)
 	}
@@ -694,7 +694,7 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 	var rel string
 	var size int64
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
-	if err := a.db.QueryRow(`SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -709,17 +709,17 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	size = st.Size()
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM images WHERE id = ? AND model_id = ?`, imageID, modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM images WHERE id = ? AND model_id = ?`, imageID, modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := tx.Exec(`UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), updated_at = ? WHERE id = ?`, size, time.Now().Unix(), modelID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), `UPDATE models SET total_bytes = MAX(total_bytes - ?, 0), updated_at = ? WHERE id = ?`, size, time.Now().Unix(), modelID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -731,7 +731,7 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m, err := a.getModel(modelID)
+	m, err := a.getModelContext(r.Context(), modelID)
 	if err == nil {
 		err = a.writeSidecar(m)
 	}
@@ -743,7 +743,7 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleTags(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT name, slug FROM tags ORDER BY name`)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT name, slug FROM tags ORDER BY name`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -769,7 +769,7 @@ func (a *App) handleMesh(w http.ResponseWriter, r *http.Request) {
 func (a *App) serveModelFile(w http.ResponseWriter, r *http.Request, attachment bool) {
 	modelID, fileID := chi.URLParam(r, "modelID"), chi.URLParam(r, "fileID")
 	var filename, rel string
-	err := a.db.QueryRow(`SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel)
+	err := a.db.QueryRowContext(r.Context(), `SELECT filename, rel_path FROM files WHERE id = ? AND model_id = ?`, fileID, modelID).Scan(&filename, &rel)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -795,7 +795,7 @@ func (a *App) serveModelFile(w http.ResponseWriter, r *http.Request, attachment 
 func (a *App) handleOwnerImage(w http.ResponseWriter, r *http.Request) {
 	modelID, imageID := chi.URLParam(r, "modelID"), chi.URLParam(r, "imageID")
 	var rel string
-	err := a.db.QueryRow(`SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel)
+	err := a.db.QueryRowContext(r.Context(), `SELECT rel_path FROM images WHERE id = ? AND model_id = ?`, imageID, modelID).Scan(&rel)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -828,7 +828,7 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 	}
 	defer finish()
 	var thumb sql.NullString
-	if err := a.db.QueryRow(`SELECT thumb_path FROM files WHERE id = ? AND model_id = ?`, req.FileID, id).Scan(&thumb); err != nil || !thumb.Valid {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT thumb_path FROM files WHERE id = ? AND model_id = ?`, req.FileID, id).Scan(&thumb); err != nil || !thumb.Valid {
 		writeError(w, http.StatusBadRequest, errors.New("thumbnail is not available"))
 		return
 	}
@@ -857,11 +857,11 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.db.Exec(`UPDATE models SET primary_thumb = ?, updated_at = ? WHERE id = ?`, cardName, time.Now().Unix(), id); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE models SET primary_thumb = ?, updated_at = ? WHERE id = ?`, cardName, time.Now().Unix(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m, err := a.getModel(id)
+	m, err := a.getModelContext(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1291,13 +1291,17 @@ func (a *App) writeSidecar(model Model) error {
 }
 
 func (a *App) getModel(id string) (Model, error) {
+	return a.getModelContext(context.Background(), id)
+}
+
+func (a *App) getModelContext(ctx context.Context, id string) (Model, error) {
 	m := Model{Files: []ModelFile{}}
-	err := a.db.QueryRow(`SELECT id,title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),COALESCE(primary_thumb,''),total_bytes,created_at,updated_at FROM models WHERE id = ?`, id).
+	err := a.db.QueryRowContext(ctx, `SELECT id,title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),COALESCE(primary_thumb,''),total_bytes,created_at,updated_at FROM models WHERE id = ?`, id).
 		Scan(&m.ID, &m.Title, &m.Description, &m.SourceURL, &m.License, &m.Author, &m.PrimaryThumb, &m.TotalBytes, &m.CreatedAt, &m.UpdatedAt)
 	if err != nil {
 		return m, err
 	}
-	rows, err := a.db.Query(`SELECT id,filename,rel_path,format,size_bytes,sha256,COALESCE(triangle_count,0),COALESCE(bbox_x,0),COALESCE(bbox_y,0),COALESCE(bbox_z,0),COALESCE(thumb_path,''),sort_order FROM files WHERE model_id = ? ORDER BY sort_order, filename, id`, id)
+	rows, err := a.db.QueryContext(ctx, `SELECT id,filename,rel_path,format,size_bytes,sha256,COALESCE(triangle_count,0),COALESCE(bbox_x,0),COALESCE(bbox_y,0),COALESCE(bbox_z,0),COALESCE(thumb_path,''),sort_order FROM files WHERE model_id = ? ORDER BY sort_order, filename, id`, id)
 	if err != nil {
 		return m, err
 	}
@@ -1313,7 +1317,7 @@ func (a *App) getModel(id string) (Model, error) {
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return m, err
 	}
-	imgRows, err := a.db.Query(`SELECT id,rel_path,sort_order FROM images WHERE model_id = ? ORDER BY sort_order`, id)
+	imgRows, err := a.db.QueryContext(ctx, `SELECT id,rel_path,sort_order FROM images WHERE model_id = ? ORDER BY sort_order`, id)
 	if err != nil {
 		return m, err
 	}
@@ -1329,7 +1333,7 @@ func (a *App) getModel(id string) (Model, error) {
 	if err := errors.Join(imgRows.Err(), imgRows.Close()); err != nil {
 		return m, err
 	}
-	tagRows, err := a.db.Query(`SELECT tags.name FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = ? ORDER BY tags.name`, id)
+	tagRows, err := a.db.QueryContext(ctx, `SELECT tags.name FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = ? ORDER BY tags.name`, id)
 	if err != nil {
 		return m, err
 	}
