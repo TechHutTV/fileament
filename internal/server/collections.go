@@ -541,6 +541,8 @@ func (a *App) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	refresh := query.Get("refresh") == "1"
 	share, err := a.resolveShare(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		publicError(w, err)
@@ -553,11 +555,12 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		a.recordShareView(r.Context(), &share)
+		if !refresh {
+			a.recordShareView(r.Context(), &share)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"share": share, "model": m})
 		return
 	}
-	query := r.URL.Query()
 	c, err := a.getCollectionPage(r.Context(), share.TargetID, parseLimit(query.Get("limit"), 24), query.Get("cursor"))
 	if err != nil {
 		writeError(w, collectionReadStatus(err), err)
@@ -572,20 +575,36 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		modelID = c.Models[0].ID
 	}
 	var model *Model
+	modelUnavailable := false
 	if modelID != "" {
-		if !a.collectionContains(r.Context(), share.TargetID, modelID) {
-			writeError(w, http.StatusNotFound, errors.New("model not found"))
+		var member bool
+		if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS (SELECT 1 FROM collection_models WHERE collection_id=? AND model_id=?)`, share.TargetID, modelID).Scan(&member); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		selected, err := a.getModelContext(r.Context(), modelID)
-		if err != nil {
-			writeError(w, collectionReadStatus(err), err)
-			return
+		if !member {
+			if !refresh {
+				writeError(w, http.StatusNotFound, errors.New("model not found"))
+				return
+			}
+			modelUnavailable = true
+		} else {
+			selected, err := a.getModelContext(r.Context(), modelID)
+			if err != nil {
+				writeError(w, collectionReadStatus(err), err)
+				return
+			}
+			model = &selected
 		}
-		model = &selected
 	}
-	a.recordShareView(r.Context(), &share)
-	writeJSON(w, http.StatusOK, map[string]any{"share": share, "collection": c, "model": model})
+	if !refresh {
+		a.recordShareView(r.Context(), &share)
+	}
+	result := map[string]any{"share": share, "collection": c, "model": model}
+	if modelUnavailable {
+		result["modelUnavailable"] = true
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
