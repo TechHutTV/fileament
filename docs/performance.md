@@ -74,3 +74,37 @@ Median results from three runs on Apple M5/macOS arm64, Go 1.26.8, September 12,
 Four connections balance browsing latency, write throughput, and per-connection memory. A single connection has lower mixed-operation overhead in this short fixture but serializes readers behind writes. Eight improves reads further while increasing total time and connection cost. The unlimited baseline includes failed operations and cannot be treated as successful throughput. Rerun on the deployment's storage before drawing production latency conclusions.
 
 Request reads, authorization checks, direct handler transactions, and worker SQL use cancellation contexts. Recovery/finalization remains independent of a disconnected request so files and sidecars can still be made consistent. Restore closes and checkpoints the active database before recording the files to swap; rollback also removes journal files created by the replacement database. Tests cover concurrent read/modify/write transactions, reader snapshots during writes, pool saturation, expensive query cancellation and connection reuse, backup/restore, and recovery from an interrupted replacement with live WAL data.
+
+## Import inspection and startup
+
+Ingestion uses the same bounded parsers as rendering but accumulates triangle counts and bounds without retaining expanded triangles. STL and OBJ feed SHA-256 during parsing; the random-access 3MF decoder retains its bounded package model and uses a separate sequential checksum pass. OBJ keeps the vertex table needed for indexed faces. Workers still parse persisted files for rendering; no cross-request geometry cache is introduced.
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test ./internal/server -run '^$' -bench 'Benchmark(MeshIngestion|SidecarStartup)' -benchtime=3x -count=1
+```
+
+The ingestion fixtures contain 100,000 repeated planar triangles. Measurements include file metadata, checksum, validation, and statistics, excluding upload transport, publication, and rendering. Results below are means of three iterations on Apple M5/macOS arm64, Go 1.26.8, September 12, 2026. The baseline uses commit `78b10d4`; the comparison includes the streaming inspection and startup changes. These short, synthetic measurements use warm local files and are not production latency estimates. Allocated bytes are cumulative allocations per operation, not peak resident memory.
+
+| Fixture | Baseline time | Inspection time | Baseline allocated bytes | Inspection allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Binary STL | 7.28 ms | 5.41 ms | 7,301,498 | 67,384 |
+| ASCII STL | 42.47 ms | 24.21 ms | 75,669,941 | 24,133,109 |
+| OBJ | 21.67 ms | 8.14 ms | 52,400,752 | 7,267,496 |
+
+Startup fixtures have two small STL files and three shared tags per model, one collection per 100 models, and persistent pending thumbnail jobs. Setup writes real files and sidecars and primes SQLite before measurement. Each operation opens the database, runs the full application initialization with workers disabled, reads the connection's SQLite change count, and closes the application. It does not include fixture creation or HTTP requests.
+
+| Models | Baseline reopen | Optimized reopen | Baseline SQLite row changes | Optimized row changes |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 986 ms | 91 ms | 103,714 | 0 |
+| 10,000 | 65,035 ms | 898 ms | 1,036,225 | 0 |
+
+The change count includes trigger and FTS maintenance writes. Startup still reads and validates sidecars and compares full indexed model metadata and relationships. This avoids a persistent fingerprint cache and its invalidation requirements. A difference or unreadable model record takes the existing reconstruction path; missing FTS rows and thumbnail jobs are repaired. Stale model/file/image/collection relationships are still pruned, and fresh-index reconstruction is covered by restart tests. The comparison adds some serialization: total startup allocations rose from about 141 MB to 146 MB at 10,000 models, while allocation count fell from 3.07 million to 2.57 million.
+
+The schema-version-5 migration replaces the single-column job/file index with `(file_id, type, created_at DESC, id DESC)`. The previous planner could choose the job-type index for each per-file lookup, scanning unrelated jobs repeatedly. Query-plan tests require the file-first index for reconstruction and latest-job queries; it also supports deletion's file-ID lookup. No index hint or reduced durability setting is needed.
+
+The renderer remains unchanged. A separate 512-pixel, 20,000-triangle curved-grid benchmark averaged 20.4 ms and 4.14 MB allocated per PNG. In its three-second CPU profile, DEFLATE compression accounted for about 45% of sampled CPU time, PNG filtering 14%, and triangle filling 8%. This scene does not justify adding rasterizer complexity; heavily overlapping geometry can behave differently.
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test ./internal/render -run '^$' -bench BenchmarkThumbnailGrid -benchtime=3s -cpuprofile=/tmp/fileament-render.prof -o /tmp/fileament-render.test
+GOTOOLCHAIN=go1.26.8 go tool pprof -top /tmp/fileament-render.test /tmp/fileament-render.prof
+```

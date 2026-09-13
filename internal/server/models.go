@@ -1248,21 +1248,13 @@ func (a *App) buildFileRecord(ctx context.Context, modelID, absPath, relPath str
 	if err := ctx.Err(); err != nil {
 		return ModelFile{}, err
 	}
-	st, err := os.Stat(absPath)
-	if err != nil {
-		return ModelFile{}, err
-	}
-	sum, err := shaFileContext(ctx, absPath)
-	if err != nil {
-		return ModelFile{}, err
-	}
-	stats, _, err := mesh.ParseFileContext(ctx, absPath)
+	info, err := mesh.InspectFileContext(ctx, absPath)
 	if err != nil {
 		return ModelFile{}, err
 	}
 	return ModelFile{
-		ID: ids.New(), ModelID: modelID, Filename: filepath.Base(relPath), RelPath: relPath, Format: stats.Format,
-		SizeBytes: st.Size(), SHA256: sum, TriangleCount: stats.TriangleCount, BBoxX: stats.BBoxX, BBoxY: stats.BBoxY, BBoxZ: stats.BBoxZ, SortOrder: order,
+		ID: ids.New(), ModelID: modelID, Filename: filepath.Base(relPath), RelPath: relPath, Format: info.Format,
+		SizeBytes: info.SizeBytes, SHA256: info.SHA256, TriangleCount: info.TriangleCount, BBoxX: info.BBoxX, BBoxY: info.BBoxY, BBoxZ: info.BBoxZ, SortOrder: order,
 	}, nil
 }
 

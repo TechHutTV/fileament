@@ -71,6 +71,14 @@ func (a *App) rebuildCollectionsFromSidecar() error {
 	if err := json.Unmarshal(b, &collections); err != nil {
 		return err
 	}
+	indexed, err := a.listCollections()
+	unchanged := err == nil && equalJSON(collections, indexed)
+	for _, c := range collections {
+		unchanged = unchanged && c.ID != "" && c.Name != "" && c.Slug != ""
+	}
+	if unchanged {
+		return nil
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -110,6 +118,17 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, slug=excluded.slug, descriptio
 func (a *App) upsertSidecarModel(m Model) error {
 	if err := validateSidecarModel(m); err != nil {
 		return err
+	}
+	// Unreadable index rows still need reconstruction from the sidecar.
+	indexed, err := a.getModel(m.ID)
+	if err == nil && equalJSON(m, indexed) {
+		var searchable bool
+		if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM models_fts WHERE rowid=(SELECT rowid FROM models WHERE id=?))`, m.ID).Scan(&searchable); err != nil {
+			return err
+		}
+		if searchable {
+			return a.queueMissingModelThumbnails(m.ID)
+		}
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -176,6 +195,37 @@ WHERE images.model_id = excluded.model_id`, img.ID, m.ID, img.RelPath, img.SortO
 			return err
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO model_tags(model_id, tag_id) VALUES(?, (SELECT id FROM tags WHERE slug = ?))`, m.ID, slug); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *App) queueMissingModelThumbnails(modelID string) error {
+	rows, err := a.db.Query(`SELECT f.id FROM files f WHERE f.model_id=? AND COALESCE(f.thumb_path,'')=''
+AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.file_id=f.id AND j.type='thumbnail')`, modelID)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		missing = append(missing, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil || len(missing) == 0 {
+		return err
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range missing {
+		if _, err := tx.Exec(`INSERT INTO jobs(id,type,file_id,status,created_at) VALUES(?,'thumbnail',?,'pending',?)`, ids.New(), id, time.Now().Unix()); err != nil {
 			return err
 		}
 	}

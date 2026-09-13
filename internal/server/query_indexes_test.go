@@ -19,7 +19,7 @@ var indexedQueries = []struct {
 	{"files", `SELECT id FROM files WHERE model_id = '00000500' ORDER BY sort_order, filename`, "files_model_order"},
 	{"images", `SELECT id FROM images WHERE model_id = '00000500' ORDER BY sort_order`, "images_model_order"},
 	{"pending", `SELECT id,file_id FROM jobs WHERE type='thumbnail' AND status='pending' ORDER BY created_at, id LIMIT 1`, "jobs_pending_order"},
-	{"file-jobs", `SELECT id FROM jobs WHERE file_id='00000500-0'`, "jobs_file_id"},
+	{"file-jobs", `SELECT id FROM jobs WHERE file_id='00000500-0'`, "jobs_file_order"},
 	{"collection-order", `SELECT model_id FROM collection_models WHERE collection_id='collection' ORDER BY sort_order`, "collection_models_order"},
 	{"model-membership", `SELECT collection_id FROM collection_models WHERE model_id='00000500'`, "collection_models_model"},
 	{"tag-models", `SELECT model_id FROM model_tags WHERE tag_id='tag'`, "model_tags_tag"},
@@ -27,7 +27,7 @@ var indexedQueries = []struct {
 }
 
 func TestQueryIndexMigrationPlans(t *testing.T) {
-	for _, version := range []int{0, 1, 2} {
+	for _, version := range []int{0, 1, 2, 3, 4, 5} {
 		t.Run(fmt.Sprintf("from-%d", version), func(t *testing.T) {
 			db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "index.db"))+"?_pragma=foreign_keys(ON)")
 			if err != nil {
@@ -42,8 +42,23 @@ func TestQueryIndexMigrationPlans(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if version == 2 {
+			if version >= 2 {
 				if _, err := db.Exec(jobLifecycleMigration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version >= 3 {
+				if _, err := db.Exec(queryIndexesMigration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version >= 4 {
+				if _, err := db.Exec(thumbnailRetryMigration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version == 5 {
+				if _, err := db.Exec(thumbnailFileIndexMigration); err != nil {
 					t.Fatal(err)
 				}
 			}

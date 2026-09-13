@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -43,96 +45,110 @@ func ParseFile(path string) (Stats, []Triangle, error) {
 	return ParseFileContext(context.Background(), path)
 }
 
+type FileInspection struct {
+	Stats
+	SizeBytes int64
+	SHA256    string
+}
+
+// InspectFileContext validates and hashes a mesh without retaining expanded triangles.
+func InspectFileContext(ctx context.Context, path string) (FileInspection, error) {
+	info, _, err := parseAdmittedFile(ctx, path, false)
+	return info, err
+}
+
 func ParseFileContext(ctx context.Context, path string) (Stats, []Triangle, error) {
+	info, tris, err := parseAdmittedFile(ctx, path, true)
+	return info.Stats, tris, err
+}
+
+func parseAdmittedFile(ctx context.Context, path string, retain bool) (FileInspection, []Triangle, error) {
 	ctx, cancel := context.WithTimeout(ctx, maxParserDuration)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	}
 	select {
 	case parserSlots <- struct{}{}:
 		defer func() { <-parserSlots }()
 	case <-ctx.Done():
-		return Stats{}, nil, ctx.Err()
+		return FileInspection{}, nil, ctx.Err()
 	}
-	return parseFileWithLimits(ctx, path, defaultParserLimits())
+	return readMeshFile(ctx, path, defaultParserLimits(), retain)
 }
 
 func parseFileWithLimits(ctx context.Context, path string, limits parserLimits) (Stats, []Triangle, error) {
+	info, tris, err := readMeshFile(ctx, path, limits, true)
+	return info.Stats, tris, err
+}
+
+func readMeshFile(ctx context.Context, path string, limits parserLimits, retain bool) (FileInspection, []Triangle, error) {
 	if st, err := os.Lstat(path); err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	} else if !st.Mode().IsRegular() {
-		return Stats{}, nil, errors.New("mesh must be a regular file")
+		return FileInspection{}, nil, errors.New("mesh must be a regular file")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	} else if !st.Mode().IsRegular() || st.Size() <= 0 {
-		return Stats{}, nil, errors.New("mesh is empty")
+		return FileInspection{}, nil, errors.New("mesh is empty")
 	} else if st.Size() > maxParserBytes {
-		return Stats{}, nil, errors.New("mesh exceeds parser size limit")
+		return FileInspection{}, nil, errors.New("mesh exceeds parser size limit")
 	}
 	var format string
-	var tris []Triangle
-	r := contextReader{ctx: ctx, r: io.NewSectionReader(f, 0, st.Size())}
+	collector := triangleCollector{retain: retain, limit: limits.triangles}
+	hasher := sha256.New()
+	var r io.Reader = contextReader{ctx: ctx, r: io.NewSectionReader(f, 0, st.Size())}
+	if !retain {
+		r = io.TeeReader(r, hasher)
+	}
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
 	case "stl":
 		format = "stl"
-		tris, err = parseSTL(ctx, bufio.NewReaderSize(r, 64<<10), st.Size(), limits)
+		err = parseSTL(ctx, bufio.NewReaderSize(r, 64<<10), st.Size(), limits, &collector)
 	case "obj":
 		format = "obj"
-		tris, err = parseOBJ(ctx, r, limits)
+		err = parseOBJ(ctx, r, limits, &collector)
 	case "3mf":
 		format = "3mf"
-		tris, err = parse3MF(ctx, f, st.Size(), limits)
+		err = parse3MF(ctx, f, st.Size(), limits, &collector)
+		if err == nil && !retain {
+			_, err = io.Copy(io.Discard, r)
+		}
 	default:
-		return Stats{}, nil, errors.New("unsupported mesh format")
+		return FileInspection{}, nil, errors.New("unsupported mesh format")
 	}
 	if err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	}
-	if len(tris) == 0 {
-		return Stats{}, nil, errors.New("mesh contains no triangles")
+	if collector.count == 0 {
+		return FileInspection{}, nil, errors.New("mesh contains no triangles")
 	}
-	result := stats(format, tris)
+	result := collector.stats(format)
 	if err := ctx.Err(); err != nil {
-		return Stats{}, nil, err
+		return FileInspection{}, nil, err
 	}
 	if !finite(result.BBoxX) || !finite(result.BBoxY) || !finite(result.BBoxZ) {
-		return Stats{}, nil, errors.New("invalid mesh bounds")
+		return FileInspection{}, nil, errors.New("invalid mesh bounds")
 	}
-	return result, tris, nil
+	info := FileInspection{Stats: result, SizeBytes: st.Size()}
+	if !retain {
+		info.SHA256 = hex.EncodeToString(hasher.Sum(nil))
+	}
+	return info, collector.triangles, nil
 }
 
-func stats(format string, tris []Triangle) Stats {
-	if len(tris) == 0 {
-		return Stats{Format: format}
-	}
-	min := Vec3{math.MaxFloat64, math.MaxFloat64, math.MaxFloat64}
-	max := Vec3{-math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64}
-	for _, tri := range tris {
-		for _, v := range []Vec3{tri.A, tri.B, tri.C} {
-			min.X = math.Min(min.X, v.X)
-			min.Y = math.Min(min.Y, v.Y)
-			min.Z = math.Min(min.Z, v.Z)
-			max.X = math.Max(max.X, v.X)
-			max.Y = math.Max(max.Y, v.Y)
-			max.Z = math.Max(max.Z, v.Z)
-		}
-	}
-	return Stats{Format: format, TriangleCount: len(tris), BBoxX: max.X - min.X, BBoxY: max.Y - min.Y, BBoxZ: max.Z - min.Z}
-}
-
-func parseSTL(ctx context.Context, r io.Reader, size int64, limits parserLimits) ([]Triangle, error) {
+func parseSTL(ctx context.Context, r io.Reader, size int64, limits parserLimits, collector *triangleCollector) error {
 	header := make([]byte, 84)
 	read, err := io.ReadFull(r, header)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, err
+		return err
 	}
 	header = header[:read]
 	if len(header) == 84 {
@@ -140,58 +156,61 @@ func parseSTL(ctx context.Context, r io.Reader, size int64, limits parserLimits)
 		want := int64(84) + int64(n)*50
 		if want == size {
 			if uint64(n) > uint64(limits.triangles) {
-				return nil, errMeshLimit
+				return errMeshLimit
 			}
-			tris := make([]Triangle, 0, n)
+			if collector.retain {
+				collector.triangles = make([]Triangle, 0, n)
+			}
 			var facet [50]byte
 			for i := uint32(0); i < n; i++ {
 				if err := ctx.Err(); err != nil {
-					return nil, err
+					return err
 				}
 				if _, err := io.ReadFull(r, facet[:]); err != nil {
-					return nil, err
+					return err
 				}
-				tris, err = appendTriangle(tris, Triangle{A: readVec(facet[12:]), B: readVec(facet[24:]), C: readVec(facet[36:])}, limits.triangles)
+				err = collector.add(Triangle{A: readVec(facet[12:]), B: readVec(facet[24:]), C: readVec(facet[36:])})
 				if err != nil {
-					return nil, err
+					return err
 				}
 			}
-			return tris, nil
+			return nil
 		} else if n > 0 && want > size && !bytes.HasPrefix(bytes.TrimSpace(header[:80]), []byte("solid")) {
-			return nil, errors.New("truncated binary stl")
+			return errors.New("truncated binary stl")
 		}
 	}
-	var tris []Triangle
-	var verts []Vec3
+	var verts [3]Vec3
+	vertexCount := 0
 	sc := bufio.NewScanner(io.MultiReader(bytes.NewReader(header), r))
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 4 && strings.EqualFold(fields[0], "vertex") {
 			v, err := parseVec(fields[1], fields[2], fields[3])
 			if err != nil {
-				return nil, err
+				return err
 			}
-			verts = append(verts, v)
-			if len(verts) == 3 {
-				tris, err = appendTriangle(tris, Triangle{A: verts[0], B: verts[1], C: verts[2]}, limits.triangles)
+			verts[vertexCount] = v
+			vertexCount++
+			if vertexCount == 3 {
+				err = collector.add(Triangle{A: verts[0], B: verts[1], C: verts[2]})
 				if err != nil {
-					return nil, err
+					return err
 				}
-				verts = nil
+				vertexCount = 0
 			}
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	if len(verts) != 0 {
-		return nil, errors.New("incomplete ascii stl facet")
+	if vertexCount != 0 {
+		return errors.New("incomplete ascii stl facet")
 	}
-	return tris, nil
+	return nil
 }
 
 func readVec(b []byte) Vec3 {
@@ -202,14 +221,13 @@ func readVec(b []byte) Vec3 {
 	}
 }
 
-func parseOBJ(ctx context.Context, r io.Reader, limits parserLimits) ([]Triangle, error) {
+func parseOBJ(ctx context.Context, r io.Reader, limits parserLimits, collector *triangleCollector) error {
 	var verts []Vec3
-	var tris []Triangle
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 0 {
@@ -218,57 +236,57 @@ func parseOBJ(ctx context.Context, r io.Reader, limits parserLimits) ([]Triangle
 		switch fields[0] {
 		case "v":
 			if len(verts) >= limits.vertices {
-				return nil, errMeshLimit
+				return errMeshLimit
 			}
 			if len(fields) < 4 {
 				continue
 			}
 			v, err := parseVec(fields[1], fields[2], fields[3])
 			if err != nil {
-				return nil, err
+				return err
 			}
 			verts = append(verts, v)
 		case "f":
 			if len(fields) < 4 {
 				continue
 			}
-			if len(fields)-3 > limits.triangles-len(tris) {
-				return nil, errMeshLimit
+			if len(fields)-3 > limits.triangles-collector.count {
+				return errMeshLimit
 			}
-			var idx []int
-			for _, field := range fields[1:] {
-				head := strings.Split(field, "/")[0]
+			first, previous := 0, 0
+			for i, field := range fields[1:] {
+				head, _, _ := strings.Cut(field, "/")
 				n, err := strconv.Atoi(head)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				if n < 0 {
 					n = len(verts) + 1 + n
 				}
 				if n <= 0 || n > len(verts) {
-					return nil, errors.New("obj face index out of range")
+					return errors.New("obj face index out of range")
 				}
-				idx = append(idx, n-1)
-			}
-			for i := 1; i+1 < len(idx); i++ {
-				var err error
-				tris, err = appendTriangle(tris, Triangle{A: verts[idx[0]], B: verts[idx[i]], C: verts[idx[i+1]]}, limits.triangles)
-				if err != nil {
-					return nil, err
+				index := n - 1
+				if i == 0 {
+					first = index
+				} else if i >= 2 {
+					if err := collector.add(Triangle{A: verts[first], B: verts[previous], C: verts[index]}); err != nil {
+						return err
+					}
 				}
+				previous = index
 			}
 		}
 	}
-	return tris, sc.Err()
+	return sc.Err()
 }
 
-func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimits) ([]Triangle, error) {
+func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimits, collector *triangleCollector) error {
 	model, err := decode3MF(ctx, r, size, limits)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	scale := unitScale(model.Units)
-	var tris []Triangle
 	active := map[string]bool{}
 	instances := 0
 	var appendObject func(string, uint32, go3mf.Matrix, int) error
@@ -297,7 +315,7 @@ func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimit
 		}
 		transform = matrixOrIdentity(transform)
 		if object.Mesh != nil {
-			if len(object.Mesh.Triangles) > limits.triangles-len(tris) {
+			if len(object.Mesh.Triangles) > limits.triangles-collector.count {
 				return errMeshLimit
 			}
 			for _, triangle := range object.Mesh.Triangles {
@@ -308,11 +326,11 @@ func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimit
 				if i1 >= uint32(len(object.Mesh.Vertices)) || i2 >= uint32(len(object.Mesh.Vertices)) || i3 >= uint32(len(object.Mesh.Vertices)) {
 					return errors.New("3mf triangle index out of range")
 				}
-				tris, err = appendTriangle(tris, Triangle{
+				err = collector.add(Triangle{
 					A: transformedPoint(object.Mesh.Vertices[i1], transform, scale),
 					B: transformedPoint(object.Mesh.Vertices[i2], transform, scale),
 					C: transformedPoint(object.Mesh.Vertices[i3], transform, scale),
-				}, limits.triangles)
+				})
 				if err != nil {
 					return err
 				}
@@ -330,18 +348,18 @@ func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimit
 		for _, object := range model.Resources.Objects {
 			if object.Mesh != nil {
 				if err := appendObject("", object.ID, go3mf.Identity(), 1); err != nil {
-					return nil, err
+					return err
 				}
 			}
 		}
-		return tris, nil
+		return nil
 	}
 	for _, item := range model.Build.Items {
 		if err := appendObject(item.ObjectPath(), item.ObjectID, matrixOrIdentity(item.Transform), 1); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return tris, nil
+	return nil
 }
 
 func matrixOrIdentity(matrix go3mf.Matrix) go3mf.Matrix {
