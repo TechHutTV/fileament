@@ -16,9 +16,13 @@ COPY . .
 COPY --from=web /web/dist ./cmd/fileament/dist
 RUN CGO_ENABLED=0 go test -tags embedded_ui ./cmd/fileament
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags embedded_ui -ldflags="-s -w" -o /fileament ./cmd/fileament
+RUN mkdir -p /runtime/data && chmod 0700 /runtime/data
 
-FROM gcr.io/distroless/static
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /fileament /fileament
+COPY --from=build --chown=65532:65532 /runtime/ /
+USER 65532:65532
+WORKDIR /
 VOLUME /data
 EXPOSE 8080
 ENTRYPOINT ["/fileament"]

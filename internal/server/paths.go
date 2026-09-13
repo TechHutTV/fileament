@@ -26,7 +26,8 @@ func containedPath(root, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if pathAbs != rootAbs && !strings.HasPrefix(pathAbs, rootAbs+string(filepath.Separator)) {
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || !filepath.IsLocal(relative) {
 		return "", errInvalidPath
 	}
 	return pathAbs, nil

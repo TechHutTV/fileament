@@ -35,7 +35,9 @@ docker volume create fileament-data
 docker run -d \
   --name fileament \
   --restart unless-stopped \
-  -p 8080:8080 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --memory=1g --cpus=2 --pids-limit=128 \
+  -p 127.0.0.1:8080:8080 \
   -v fileament-data:/data \
   ghcr.io/techhuttv/fileament:latest
 ```
@@ -57,8 +59,17 @@ services:
     image: ghcr.io/techhuttv/fileament:latest
     container_name: fileament
     restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 128
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - fileament-data:/data
 
@@ -75,6 +86,29 @@ docker compose up -d
 Open [http://localhost:8080](http://localhost:8080) and finish owner setup.
 
 For a version-pinned deployment, replace `latest` with the release number you want, such as `1.1.0`.
+
+### Container permissions and limits
+
+The production image runs as UID/GID `65532:65532`. It prepares `/data` with that ownership and private directory permissions; a new empty named volume inherits them. All runtime writes, including temporary uploads, SQLite temporary files, and backup workspaces, stay under the configured data directory (default `/data`), so the rest of the container can be read-only. At process startup, Fileament sets `SQLITE_TMPDIR` to that directory's `tmp` subdirectory, overriding any inherited value. If you change `FILEAMENT_DATA_DIR`, keep that location on a writable persistent mount. No shell or startup ownership-changing helper is included in the production image.
+
+The examples bind the published port to loopback for owner setup and a reverse proxy on the host. To allow access from your LAN, replace `127.0.0.1` with the intended private host address and complete owner setup before permitting untrusted access. A reverse proxy in another container can instead use Fileament's container port on a shared Docker network.
+
+The 1 GiB memory, two CPU, and 128-process limits are starting values for a personal library. Monitor your workload and raise memory or reduce `FILEAMENT_THUMB_WORKERS` for complex meshes or concurrent imports. Upload and backup byte limits do not reserve RAM. A container memory limit can terminate an oversized workload; interrupted thumbnail jobs are recovered on restart.
+
+Existing volumes and bind mounts retain their current ownership. Before upgrading from a root-running image, stop Fileament, back up the entire volume, and make its contents writable by the chosen non-root UID/GID. For the named volume in the quick-start example, the one-time ownership change is:
+
+```sh
+docker stop fileament
+# Back up the entire volume before changing ownership.
+docker run --rm --network none --read-only --user 0:0 \
+  --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE \
+  --mount type=volume,src=fileament-data,dst=/data \
+  busybox:1.37.0 chown -R 65532:65532 /data
+```
+
+Use your actual volume name; Compose normally prefixes it with the project name. Recreate Fileament with the updated image and settings after the ownership change. This command is an administrative migration, not a container startup step. An incompatible data owner causes startup to fail; Fileament does not silently change ownership or run as root.
+
+For a bind mount, prepare only the intended data directory and its contents for the same UID/GID on the Docker host. Alternatively, set `--user <uid>:<gid>` or Compose `user: "<uid>:<gid>"` to an existing non-root data owner. That account needs access to every existing file and directory in `/data`. Keep the read-only root, capability drop, and no-new-privileges settings. See Docker's [volume initialization behavior](https://docs.docker.com/engine/storage/volumes/#mounting-a-volume-over-existing-data) and [Compose runtime options](https://docs.docker.com/reference/compose-file/services/) for mount and limit details.
 
 ## Configuration
 
@@ -237,6 +271,8 @@ Test restores before relying on a backup process.
 
 Back up `/data` and review the [release notes](https://github.com/TechHutTV/fileament/releases) before updating.
 
+For an existing installation created by a root-running image, complete the [data ownership migration](#container-permissions-and-limits) before starting the non-root image.
+
 With Docker Compose:
 
 ```sh
@@ -303,7 +339,9 @@ docker build -t fileament:local .
 docker run -d \
   --name fileament \
   --restart unless-stopped \
-  -p 8080:8080 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --memory=1g --cpus=2 --pids-limit=128 \
+  -p 127.0.0.1:8080:8080 \
   -v fileament-data:/data \
   fileament:local
 ```
