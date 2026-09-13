@@ -35,7 +35,7 @@ type Model struct {
 	TotalBytes   int64       `json:"totalBytes"`
 	CreatedAt    int64       `json:"createdAt"`
 	UpdatedAt    int64       `json:"updatedAt"`
-	Files        []ModelFile `json:"files,omitempty"`
+	Files        []ModelFile `json:"files"`
 	Images       []Image     `json:"images,omitempty"`
 	Tags         []string    `json:"tags,omitempty"`
 }
@@ -365,6 +365,9 @@ func (a *App) streamGroupedUploads(w http.ResponseWriter, r *http.Request) ([]st
 }
 
 func uploadStatus(err error) int {
+	if errors.Is(err, errMutationRecoveryRequired) {
+		return http.StatusServiceUnavailable
+	}
 	if errors.Is(err, errBadUpload) || errors.Is(err, errInvalidPath) {
 		return http.StatusBadRequest
 	}
@@ -395,16 +398,22 @@ type patchModelRequest struct {
 
 func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	m, err := a.getModel(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	previous := m
-	previous.Tags = append([]string(nil), m.Tags...)
 	var req patchModelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, id)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
+	m, err := a.getModel(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	if req.Title != nil {
@@ -432,12 +441,10 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err = a.getModel(id)
 	if err != nil {
-		_ = a.updateModel(previous)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if err := a.writeSidecar(m); err != nil {
-		_ = a.updateModel(previous)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -445,9 +452,17 @@ func (a *App) handlePatchModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.collectionPersistMu.Lock()
 	defer a.collectionPersistMu.Unlock()
 	id := chi.URLParam(r, "id")
+	w, finish, err := a.beginMutationResponse(w, id)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	if _, err := a.getModel(id); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -462,7 +477,14 @@ func (a *App) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	}
 	root, err := containedName(filepath.Join(a.cfg.DataDir, "models"), id)
 	if err == nil {
-		_ = os.RemoveAll(root)
+		err = a.mutationStep("remove")
+	}
+	if err == nil {
+		err = os.RemoveAll(root)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -491,6 +513,19 @@ type patchModelFileRequest struct {
 
 func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	var req patchModelFileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, modelID)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	model, err := a.getModel(modelID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -505,11 +540,6 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if fileIndex < 0 {
 		writeError(w, http.StatusNotFound, sql.ErrNoRows)
-		return
-	}
-	var req patchModelFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	filename := strings.TrimSpace(req.Filename)
@@ -532,7 +562,6 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, model)
 		return
 	}
-	previousUpdatedAt := model.UpdatedAt
 	updatedAt := time.Now().Unix()
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -552,27 +581,13 @@ func (a *App) handlePatchModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	restore := func() error {
-		restoreTx, restoreErr := a.db.Begin()
-		if restoreErr == nil {
-			if _, restoreErr = restoreTx.Exec(`UPDATE files SET filename = ? WHERE id = ? AND model_id = ?`, previousFilename, fileID, modelID); restoreErr == nil {
-				_, restoreErr = restoreTx.Exec(`UPDATE models SET updated_at = ? WHERE id = ?`, previousUpdatedAt, modelID)
-			}
-			if restoreErr == nil {
-				restoreErr = restoreTx.Commit()
-			} else {
-				_ = restoreTx.Rollback()
-			}
-		}
-		return restoreErr
-	}
 	model, err = a.getModel(modelID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, errors.Join(err, restore()))
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if err := a.writeSidecar(model); err != nil {
-		writeError(w, http.StatusInternalServerError, errors.Join(err, restore()))
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, model)
@@ -598,8 +613,16 @@ func (a *App) handleAddModelImages(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 	modelID, fileID := chi.URLParam(r, "id"), chi.URLParam(r, "fid")
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, modelID)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
 	var rel, thumb sql.NullString
 	var primary string
@@ -643,21 +666,29 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if rel.Valid {
-		if path, err := containedPath(root, rel.String); err == nil {
-			_ = os.Remove(path)
+	var paths []string
+	for _, stored := range []sql.NullString{rel, thumb} {
+		if !stored.Valid || stored.String == "" {
+			continue
 		}
-	}
-	if thumb.Valid && thumb.String != "" {
-		if path, err := containedPath(root, thumb.String); err == nil {
-			_ = os.Remove(path)
+		path, err := containedPath(root, stored.String)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
+		paths = append(paths, path)
 	}
 	if primaryPath != "" {
-		_ = os.Remove(primaryPath)
+		paths = append(paths, primaryPath)
 	}
 	if clearPrimary {
-		_ = os.Remove(filepath.Join(root, "thumbs", primaryThumbSourceName))
+		paths = append(paths, filepath.Join(root, "thumbs", primaryThumbSourceName))
+	}
+	for _, path := range paths {
+		if err := a.removeStorageFile(path); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	m, err := a.getModel(modelID)
 	if err == nil {
@@ -672,6 +703,14 @@ func (a *App) handleDeleteModelFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 	modelID, imageID := chi.URLParam(r, "id"), chi.URLParam(r, "imageID")
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, modelID)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	var rel string
 	var size int64
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
@@ -679,11 +718,17 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	if path, err := containedPath(root, rel); err == nil {
-		if st, statErr := os.Stat(path); statErr == nil {
-			size = st.Size()
-		}
+	path, err := containedPath(root, rel)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
+	st, err := os.Stat(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	size = st.Size()
 	tx, err := a.db.Begin()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -702,8 +747,9 @@ func (a *App) handleDeleteModelImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if path, err := containedPath(root, rel); err == nil {
-		_ = os.Remove(path)
+	if err := a.removeStorageFile(path); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	m, err := a.getModel(modelID)
 	if err == nil {
@@ -791,8 +837,16 @@ func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
 	a.thumbMu.Lock()
 	defer a.thumbMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, id)
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	var thumb sql.NullString
 	if err := a.db.QueryRow(`SELECT thumb_path FROM files WHERE id = ? AND model_id = ?`, req.FileID, id).Scan(&thumb); err != nil || !thumb.Valid {
 		writeError(w, http.StatusBadRequest, errors.New("thumbnail is not available"))
@@ -920,20 +974,11 @@ func (a *App) ingestGroupedStagedUploads(ctx context.Context, uploads []stagedUp
 		}
 	}
 	defer os.RemoveAll(stage)
-	usedNames := map[string]struct{}{}
+	var names uploadNameAllocator
 	files := make([]ModelFile, 0, len(uploads))
 	var total int64
 	for _, upload := range uploads {
-		base := filepath.Base(upload.Name)
-		name := base
-		for suffix := 1; ; suffix++ {
-			key := strings.ToLower(name)
-			if _, exists := usedNames[key]; !exists {
-				usedNames[key] = struct{}{}
-				break
-			}
-			name = uniqueName(base, suffix)
-		}
+		name := names.allocate(filepath.Base(upload.Name))
 		dst := filepath.Join(stage, "files", name)
 		if err := os.Rename(upload.Path, dst); err != nil {
 			return Model{}, err
@@ -959,20 +1004,22 @@ func (a *App) ingestGroupedStagedUploads(ctx context.Context, uploads []stagedUp
 	return model, nil
 }
 
-func (a *App) persistStagedModel(stage string, model Model) error {
+func (a *App) persistStagedModel(stage string, model Model) (err error) {
 	a.modelPersistMu.Lock()
 	defer a.modelPersistMu.Unlock()
+	mutation, err := a.beginMutation(model.ID)
+	if err != nil {
+		return err
+	}
+	defer mutation.finishOnReturn(&err)
 	root := filepath.Join(a.cfg.DataDir, "models", model.ID)
 	if err := os.Rename(stage, root); err != nil {
 		return err
 	}
 	if err := a.insertModel(model); err != nil {
-		_ = os.RemoveAll(root)
 		return err
 	}
 	if err := a.writeSidecar(model); err != nil {
-		_, _ = a.db.Exec(`DELETE FROM models WHERE id = ?`, model.ID)
-		_ = os.RemoveAll(root)
 		return err
 	}
 	return nil
@@ -988,6 +1035,7 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 	var images []Image
 	var description string
 	var total int64
+	var fileNames, imageNames uploadNameAllocator
 	for _, zf := range zr.File {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, "", err
@@ -1010,8 +1058,12 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 		}
 		switch classifyExt(clean) {
 		case "mesh":
-			dstName := uniqueName(filepath.Base(clean), len(files))
-			dst := filepath.Join(stage, "files", dstName)
+			dstName := fileNames.allocate(filepath.Base(clean))
+			dst, err := containedName(filepath.Join(stage, "files"), dstName)
+			if err != nil {
+				_ = rc.Close()
+				return nil, nil, "", err
+			}
 			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
@@ -1023,8 +1075,12 @@ func (a *App) extractBundle(ctx context.Context, stage, uploadPath, modelID stri
 			}
 			files = append(files, mf)
 		case "image":
-			dstName := uniqueName(filepath.Base(clean), len(images))
-			dst := filepath.Join(stage, "images", dstName)
+			dstName := imageNames.allocate(filepath.Base(clean))
+			dst, err := containedName(filepath.Join(stage, "images"), dstName)
+			if err != nil {
+				_ = rc.Close()
+				return nil, nil, "", err
+			}
 			if err := copyCapped(dst, uploadContextReader{ctx, rc}, int64(zf.UncompressedSize64)); err != nil {
 				_ = rc.Close()
 				return nil, nil, "", err
@@ -1071,7 +1127,7 @@ func (a *App) routeOneFile(ctx context.Context, stage, srcPath, name, modelID st
 	}
 }
 
-func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload stagedUpload, allowMeshes, allowImages bool) (Model, error) {
+func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload stagedUpload, allowMeshes, allowImages bool) (result Model, err error) {
 	if _, err := a.getModel(modelID); err != nil {
 		return Model{}, sql.ErrNoRows
 	}
@@ -1082,7 +1138,6 @@ func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload sta
 	}
 	var files []ModelFile
 	var images []Image
-	var err error
 	if strings.EqualFold(filepath.Ext(upload.Name), ".zip") {
 		files, images, _, err = a.extractBundle(ctx, upload.StageDir, upload.Path, modelID)
 	} else {
@@ -1104,8 +1159,25 @@ func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload sta
 		return Model{}, err
 	}
 	var maxFileOrder, maxImageOrder int
-	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder)
-	_ = a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM images WHERE model_id = ?`, modelID).Scan(&maxImageOrder)
+	a.modelPersistMu.Lock()
+	defer a.modelPersistMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Model{}, err
+	}
+	if _, err := a.getModel(modelID); err != nil {
+		return Model{}, err
+	}
+	mutation, err := a.beginMutation(modelID)
+	if err != nil {
+		return Model{}, err
+	}
+	defer mutation.finishOnReturn(&err)
+	if err := a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM files WHERE model_id = ?`, modelID).Scan(&maxFileOrder); err != nil {
+		return Model{}, err
+	}
+	if err := a.db.QueryRow(`SELECT COALESCE(MAX(sort_order)+1,0) FROM images WHERE model_id = ?`, modelID).Scan(&maxImageOrder); err != nil {
+		return Model{}, err
+	}
 	root := filepath.Join(a.cfg.DataDir, "models", modelID)
 	var total int64
 	for i := range files {
@@ -1131,9 +1203,11 @@ func (a *App) appendStagedUpload(ctx context.Context, modelID string, upload sta
 		if err := os.Rename(filepath.Join(upload.StageDir, old), dst); err != nil {
 			return Model{}, err
 		}
-		if st, err := os.Stat(dst); err == nil {
-			total += st.Size()
+		st, err := os.Stat(dst)
+		if err != nil {
+			return Model{}, err
 		}
+		total += st.Size()
 	}
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -1221,24 +1295,23 @@ func (a *App) insertModel(model Model) error {
 }
 
 func (a *App) writeSidecar(model Model) error {
+	if err := a.mutationStep("model-sidecar"); err != nil {
+		return err
+	}
 	root, err := modelRootPath(a.cfg.DataDir, model.ID)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(root, "model.json")
-	tmp := path + ".tmp"
 	b, err := json.MarshalIndent(model, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteFile(path, b, 0o644)
 }
 
 func (a *App) getModel(id string) (Model, error) {
-	var m Model
+	m := Model{Files: []ModelFile{}}
 	err := a.db.QueryRow(`SELECT id,title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),COALESCE(primary_thumb,''),total_bytes,created_at,updated_at FROM models WHERE id = ?`, id).
 		Scan(&m.ID, &m.Title, &m.Description, &m.SourceURL, &m.License, &m.Author, &m.PrimaryThumb, &m.TotalBytes, &m.CreatedAt, &m.UpdatedAt)
 	if err != nil {
@@ -1257,6 +1330,9 @@ func (a *App) getModel(id string) (Model, error) {
 		}
 		m.Files = append(m.Files, f)
 	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return m, err
+	}
 	imgRows, err := a.db.Query(`SELECT id,rel_path,sort_order FROM images WHERE model_id = ? ORDER BY sort_order`, id)
 	if err != nil {
 		return m, err
@@ -1265,8 +1341,13 @@ func (a *App) getModel(id string) (Model, error) {
 	for imgRows.Next() {
 		var img Image
 		img.ModelID = id
-		_ = imgRows.Scan(&img.ID, &img.RelPath, &img.SortOrder)
+		if err := imgRows.Scan(&img.ID, &img.RelPath, &img.SortOrder); err != nil {
+			return m, err
+		}
 		m.Images = append(m.Images, img)
+	}
+	if err := errors.Join(imgRows.Err(), imgRows.Close()); err != nil {
+		return m, err
 	}
 	tagRows, err := a.db.Query(`SELECT tags.name FROM tags JOIN model_tags ON tags.id = model_tags.tag_id WHERE model_tags.model_id = ? ORDER BY tags.name`, id)
 	if err != nil {
@@ -1275,10 +1356,12 @@ func (a *App) getModel(id string) (Model, error) {
 	defer tagRows.Close()
 	for tagRows.Next() {
 		var tag string
-		_ = tagRows.Scan(&tag)
+		if err := tagRows.Scan(&tag); err != nil {
+			return m, err
+		}
 		m.Tags = append(m.Tags, tag)
 	}
-	return m, nil
+	return m, errors.Join(tagRows.Err(), tagRows.Close())
 }
 
 func (a *App) updateModel(m Model) error {
@@ -1296,7 +1379,7 @@ func (a *App) updateModel(m Model) error {
 	for _, tag := range m.Tags {
 		slug := slugify(tag)
 		tagID := "tag_" + slug
-		if _, err := tx.Exec(`INSERT INTO tags(id,name,slug) VALUES(?,?,?) ON CONFLICT(slug) DO UPDATE SET name=excluded.name`, tagID, tag, slug); err != nil {
+		if _, err := tx.Exec(`INSERT INTO tags(id,name,slug) VALUES(?,?,?) ON CONFLICT(slug) DO NOTHING`, tagID, tag, slug); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO model_tags(model_id, tag_id) VALUES(?, (SELECT id FROM tags WHERE slug = ?))`, m.ID, slug); err != nil {
@@ -1411,13 +1494,12 @@ func emptyNull(s string) any {
 }
 
 func copyCapped(dst string, src io.Reader, capBytes int64) error {
-	f, err := os.Create(dst)
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	n, err := io.Copy(f, io.LimitReader(src, capBytes+1))
-	if err != nil {
+	if err = errors.Join(err, f.Close()); err != nil {
 		return err
 	}
 	if n > capBytes {
@@ -1483,4 +1565,25 @@ func uniqueName(name string, index int) string {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(filepath.Base(name), ext)
 	return stem + "-" + strconv.FormatInt(int64(index), 10) + ext
+}
+
+type uploadNameAllocator struct {
+	used map[string]struct{}
+	next map[string]int
+}
+
+func (a *uploadNameAllocator) allocate(base string) string {
+	if a.used == nil {
+		a.used, a.next = map[string]struct{}{}, map[string]int{}
+	}
+	baseKey := strings.ToLower(base)
+	for suffix := a.next[baseKey]; ; suffix++ {
+		name := uniqueName(base, suffix)
+		key := strings.ToLower(name)
+		if _, exists := a.used[key]; !exists {
+			a.used[key] = struct{}{}
+			a.next[baseKey] = suffix + 1
+			return name
+		}
+	}
 }

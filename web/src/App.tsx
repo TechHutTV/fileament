@@ -3,6 +3,7 @@ import { Box, Check, ChevronDown, Copy, Download, Eye, EyeOff, Folder, Github, H
 import { Suspense, lazy, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { getModelColor, saveModelColor } from './viewerPreferences';
+import { ViewerBoundary } from './ViewerBoundary';
 
 const ModelViewer = lazy(() => import('./Viewer'));
 const VIEWER_LIMIT = 50 * 1024 * 1024;
@@ -80,10 +81,14 @@ export function App() {
 }
 
 function OwnerApp({ path }: { path: string }) {
-  const [dark, setDark] = useState(localStorage.getItem('fileament-theme') === 'dark');
+  const [dark, setDark] = useState(() => {
+    try { return localStorage.getItem('fileament-theme') === 'dark'; }
+    catch { return false; }
+  });
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    localStorage.setItem('fileament-theme', dark ? 'dark' : 'light');
+    try { localStorage.setItem('fileament-theme', dark ? 'dark' : 'light'); }
+    catch { /* Keep the current theme when browser storage is unavailable. */ }
   }, [dark]);
   const me = useQuery<Me>({ queryKey: ['me'], queryFn: () => api('/api/me') });
   if (me.isLoading) return <Shell><Empty text="Loading" /></Shell>;
@@ -233,7 +238,7 @@ function Detail({ id }: { id: string }) {
   return (
     <section className="detail">
       <div className="viewer">
-        {file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer key={file.id} file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense> : <div className="static-thumb">{previewThumb ? <img src={`/thumbs/${model.id}/${previewThumb}`} alt={`${file?.filename ?? model.title} preview`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
+        {file && (canAutoLoad || forceViewer) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer key={file.id} file={file} url={`/mesh/${model.id}/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{previewThumb ? <img src={`/thumbs/${model.id}/${previewThumb}`} alt={`${file?.filename ?? model.title} preview`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}
       </div>
       <aside className="panel">
         {file && <div className="selected-variant-actions" role="group" aria-label="Selected variant">
@@ -245,6 +250,7 @@ function Detail({ id }: { id: string }) {
         <div className="meta">{model.author && <span>By {model.author}</span>}{model.license && <span>{model.license}</span>}{model.sourceUrl && <a href={model.sourceUrl}>Source</a>}</div>
         <div className="tags">{model.tags?.map((t) => <span key={t}>{t}</span>)}</div>
         <h2>Variants and downloads</h2>
+        {model.files.length === 0 && <p>No model files. Add a variant to preview or download.</p>}
         {model.files.map((f) => <ModelFileRow key={f.id} modelID={model.id} file={f} busy={renameFile.isPending} onRename={async (filename) => { await renameFile.mutateAsync({ fid: f.id, filename }); }} onUseThumbnail={() => setThumb.mutate(f.id)} onDelete={() => { resetDeletionState(); setConfirmation({ title: 'Delete variant?', description: `Delete “${f.filename}” from “${model.title}”? This cannot be undone.`, confirmLabel: 'Delete variant', onConfirm: () => deleteFile.mutate(f.id) }); }} />)}
         <UploadInline label="Add variants" path={`/api/models/${id}/files`} onDone={invalidate} />
         <h2>Images</h2>
@@ -811,7 +817,7 @@ function PublicModel({ model, token }: { model: Model; token: string }) {
   const [forceViewer, setForceViewer] = useState(false);
   const file = model.files.find((f) => f.id === selectedFileID) ?? model.files[0];
   const canAutoLoad = canAutoLoadViewer(file);
-  return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2><Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
+  return <><div className="viewer">{file && (canAutoLoad || forceViewer) ? <ViewerBoundary key={file.id}><Suspense fallback={<Empty text="Loading view" />}><ModelViewer file={file} url={`/api/public/${token}/mesh/${file.id}`} /></Suspense></ViewerBoundary> : <div className="static-thumb">{model.primaryThumb ? <img src={`/api/public/${token}/thumbs/${model.primaryThumb}?model=${model.id}`} alt={`${model.title} thumbnail`} /> : <Box size={64} aria-hidden />}{file && <button type="button" onClick={() => setForceViewer(true)}>Load 3D view</button>}</div>}</div><aside className="panel"><h1>{model.title}</h1><Markdown text={model.description} /><h2>Variants and downloads</h2>{model.files.length === 0 ? <p>No model files are available.</p> : <Select label="Variant" value={file?.id ?? ''} onChange={(v) => { setSelectedFileID(v); setForceViewer(false); }} options={model.files.map((f) => [f.id, f.filename] as [string, string])} />}{model.images?.map((img) => <img className="wide-image" key={img.id} src={`/api/public/${token}/images/${img.id}`} alt={`${model.title} image`} />)}{model.files.map((f) => <a className="file" key={f.id} href={`/api/public/${token}/files/${f.id}`}><Download size={16} />{f.filename}<span>{formatBytes(f.sizeBytes)}</span></a>)}</aside></>;
 }
 
 function CollectionMembership({ collections, model }: { collections: Collection[]; model: Model }) {

@@ -116,6 +116,8 @@ The upload screen supports loose STL, OBJ, and 3MF files plus ZIP archives. Choo
 
 ZIP processing rejects unsafe paths and common junk files. Uploads are streamed into the persistent data volume instead of being buffered in memory.
 
+ZIP mesh and image names are flattened into their respective directories. Duplicate names, including case variants and existing numeric suffixes, receive an available numeric suffix. Each entry gets its own file, so deleting one variant cannot remove another variant's contents.
+
 Mesh processing has separate limits from the upload request size. Each mesh may occupy at most 512 MiB on disk and produce at most 1,000,000 triangles. OBJ and 3MF inputs may contain at most 2,000,000 vertices; STL and OBJ text lines are limited to 1 MiB. Coordinates and transforms must be finite, and final coordinate magnitudes cannot exceed 10¹² model units (millimeters after 3MF unit conversion).
 
 A 3MF package may contain at most 2,048 ZIP entries and 64 MiB of expanded content, including attachments. ZIP metadata reads have a 4 MiB budget. XML and component nesting are limited to 64 levels, and both resource declarations and expanded component visits have a 100,000-item budget. Package validation checks actual expanded bytes before decoding model parts serially. These limits also apply when thumbnail workers read existing files.
@@ -126,11 +128,17 @@ At most two meshes are parsed concurrently, with a 30-second deadline including 
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
+Tags with the same normalized slug share the existing label. Reusing a tag does not rename it on other models.
+
+Deleting the last variant keeps the model's metadata, images, and collection membership. Empty models remain visible in the catalog and share pages; the owner can add new variants or delete the model. Model API responses always include a `files` array, which is empty when there are no variants.
+
 ### Preview and download
 
 Supported meshes can be opened in the browser viewer. Files larger than 50 MiB, files with more than 250,000 triangles, and files without valid geometry statistics wait for **Load 3D view** before loading. This applies to owner and public share pages; each variant requires its own confirmation. Original files remain available for download, and each variation can be renamed inline without changing its file format.
 
 Raw mesh endpoints serve original bytes as `application/octet-stream` with content sniffing disabled and a sandbox policy. Model files are never served as HTML; download endpoints retain their attachment filenames.
+
+If a 3D view fails to load, its error stays inside the preview so downloads and navigation remain available. Browser storage is optional: login and theme controls continue working when saved preferences cannot be read or written, with theme changes lasting for the current page session.
 
 ### Share models and collections
 
@@ -147,6 +155,7 @@ Everything required to restore Fileament lives under `/data`:
   tmp/
   backups/
   .restore/
+  .mutations/
   models/
     <model-id>/
       model.json
@@ -155,7 +164,15 @@ Everything required to restore Fileament lives under `/data`:
       thumbs/
 ```
 
-Use **Settings → Backup and restore** to create a versioned `.fileament` backup. It contains a consistent SQLite snapshot plus every persistent data file, including models, images, collections, settings, the owner password hash, and share links. Login sessions and transient backup/restore workspace are intentionally excluded. Treat the downloaded file as sensitive.
+Model and collection changes publish in sequence so simultaneous requests preserve each other's changes. Upload parsing and thumbnail rendering run outside that publication lock. Before changing active data, Fileament saves a rollback snapshot and syncs a journal under `/data/.mutations`. Snapshots use hardlinks for unchanged files, with a copy fallback on filesystems that do not support hardlinks. Sidecar and thumbnail replacements use unique temporary files; success is returned after the resulting files, sidecars, and commit marker have been synced.
+
+Failed changes restore the preceding files and sidecars and reconcile SQLite before returning the error. Startup rolls back interrupted changes and retains completed commits. If commit finalization or rollback cannot finish, Fileament remains in maintenance, returns HTTP `503`, and retries journal recovery after restart. Resolve the underlying storage problem, restart Fileament, and check the resulting state before retrying the change. Keep `.mutations` intact while recovery is pending. Its workspace is excluded from application-created backups and cannot be supplied by a restore archive.
+
+Sidecars define model and collection contents during reconstruction: stale indexed files, images, models, collections, and unused tags are removed from SQLite. An existing model directory without a valid sidecar stops startup so its remaining data and index can be recovered; original files are not silently discarded. Unreferenced files on disk are preserved. Thumbnail files are derived data and may be absent while previews are being regenerated.
+
+Deleting a file or model also removes its thumbnail jobs. A render already in progress cannot recreate deleted model data. Completed and failed job history is capped at 1,000 records; records older than seven days are removed at startup and as jobs finish. Pending and running jobs are preserved, and interrupted work resumes after restart.
+
+Use **Settings → Backup and restore** to create a versioned `.fileament` backup. It contains a consistent SQLite snapshot plus every persistent data file, including models, images, collections, settings, the owner password hash, and share links. Login sessions and transient backup, restore, and mutation workspace are intentionally excluded. Treat the downloaded file as sensitive.
 
 Restoring is a full replacement, not a merge. Fileament validates the uploaded archive, database, sidecars, checksums, paths, sizes, and format versions before showing its contents for confirmation. Only one reviewed backup is staged at a time; reviewing another replaces it, restore tokens expire after one hour, and abandoned restore workspace is cleared at startup. Applying it creates a pre-restore safety backup under `/data/backups`, pauses writes and thumbnail workers, swaps the validated data, reopens and migrates SQLite, and automatically rolls back if activation fails. If both activation and the immediate rollback fail, Fileament retries journal recovery once, remains in maintenance with an unhealthy `/healthz` response if recovery is still impossible, and retries recovery at the next startup. Every login session is invalidated after a successful restore; sign in with the owner password stored in that backup. Safety backups are not recursively included in later downloads and can be removed manually after the restored installation has been verified.
 
