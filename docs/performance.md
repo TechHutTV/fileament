@@ -226,3 +226,33 @@ Thumbnail notifications now enter a fixed 250 ms batch window. A controlled fron
 The queue retains at most 256 distinct model IDs; overflow requests full reconciliation. Refreshes are serialized, and events received during a request remain queued for another batch. If an affected query was already loading before the event, it is refreshed again after that older request settles. Active model details are targeted by model ID, and collection details by loaded membership; catalog and collection summaries refresh in batches. Server data determines the selected cover, and a regression test verifies that preview updates preserve an unsaved model title.
 
 Catalog/model/collection subscriptions reconcile after reconnects and every minute, including when EventSource is unavailable. Existing pending-model polling remains at 15 seconds. Upload reconciliation checks pending models every 15 seconds and uses at most three concurrent model requests. Completed uploads are fetched again only for a relevant event or an overflow reconciliation. Explicitly queued events survive a simultaneous pending-upload reconciliation. Unmount closes streams, clears timers, aborts upload refreshes, and prevents queued callbacks from starting. Public pages do not subscribe to owner events.
+
+## Metadata and tag updates
+
+Model metadata updates compare saved fields and tag relationships within the existing immediate transaction. They update only changed columns, retain unchanged tag links, and add or remove only the changed links. Author, license, source URL, and timestamp changes no longer trigger full-text search maintenance. Changed titles, descriptions, and tag links still use the existing search triggers. The mutation recovery guard and durable sidecar publication remain in place.
+
+Run the database benchmark from the repository root:
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test ./internal/server -run '^$' \
+  -bench '^BenchmarkModelMetadataUpdates$' -benchtime=10x -count=3
+```
+
+The benchmark uses one model with 10, 100, or 500 tags, one SQLite connection, WAL, full commit synchronization, and immediate transactions. Setup creates the model and both alternating tag labels before timing. Each operation advances `updatedAt`: `unchanged` measures a timestamp-only save, while the other cases alternate the author, title, or one tag. A separate regression test verifies zero database row changes for a true no-op with the same timestamp.
+
+Local results on September 12, 2026, on Apple M5/macOS arm64 with Go 1.26.8 are below. Each value is the median of three runs, each reporting the mean of ten operations. The baseline ran the same benchmark harness against commit `3a843715ef63de4533068c31baa1970b11c0a97b`; reproducing it requires copying this benchmark test into an isolated checkout of that commit, which predates the harness.
+
+| Tags | Changed fields | Time per operation, before → after | SQLite row changes per operation, before → after | Allocated bytes per operation, before → after |
+| --- | --- | --- | --- | --- |
+| 100 | Timestamp only | 8.60 ms → 0.143 ms | 2,791 → 1 | 58,830 → 20,516 |
+| 100 | Author and timestamp | 8.40 ms → 0.123 ms | 2,791 → 1 | 58,707 → 20,662 |
+| 100 | Title and timestamp | 8.47 ms → 0.215 ms | 2,791 → 11 | 58,648 → 20,712 |
+| 100 | One tag and timestamp | 8.43 ms → 0.329 ms | 2,791 → 27.9 | 60,540 → 23,472 |
+| 500 | Timestamp only | 147.09 ms → 0.381 ms | 14,920 → 1 | 289,923 → 112,784 |
+| 500 | Author and timestamp | 146.13 ms → 0.377 ms | 14,920 → 1 | 290,021 → 112,929 |
+| 500 | Title and timestamp | 146.88 ms → 0.721 ms | 15,077 → 16.8 | 290,050 → 112,979 |
+| 500 | One tag and timestamp | 147.43 ms → 1.100 ms | 14,920 → 39.1 | 298,062 → 122,163 |
+
+SQLite `total_changes()` includes internal full-text search row changes; it does not count disk writes, bytes, or synchronization calls. Fractional results reflect per-operation averages that include internal index maintenance. The benchmark measures direct database updates and excludes HTTP, authentication, model hydration, sidecar snapshots/publication, file payloads, and the frontend. These short runs with warm caches do not establish end-to-end save latency.
+
+The implementation still scans the current and requested tag sets. Each changed relationship invokes the existing search trigger, so replacing every tag continues to cost more than retaining the same tags or changing one. No durability settings or search semantics were weakened to obtain these results.

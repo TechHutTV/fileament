@@ -1365,19 +1365,89 @@ func (a *App) updateModel(m Model) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE models SET title=?, description=?, source_url=?, license=?, author=?, updated_at=? WHERE id=?`, m.Title, m.Description, emptyNull(m.SourceURL), emptyNull(m.License), emptyNull(m.Author), m.UpdatedAt, m.ID); err != nil {
+	var before Model
+	if err := tx.QueryRow(`SELECT title,description,COALESCE(source_url,''),COALESCE(license,''),COALESCE(author,''),updated_at FROM models WHERE id=?`, m.ID).
+		Scan(&before.Title, &before.Description, &before.SourceURL, &before.License, &before.Author, &before.UpdatedAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM model_tags WHERE model_id = ?`, m.ID); err != nil {
-		return err
+	var columns []string
+	var values []any
+	for _, field := range []struct {
+		column, old, value string
+		nullable           bool
+	}{
+		{"title", before.Title, m.Title, false}, {"description", before.Description, m.Description, false},
+		{"source_url", before.SourceURL, m.SourceURL, true}, {"license", before.License, m.License, true}, {"author", before.Author, m.Author, true},
+	} {
+		if field.old == field.value {
+			continue
+		}
+		columns = append(columns, field.column+"=?")
+		if field.nullable {
+			values = append(values, emptyNull(field.value))
+		} else {
+			values = append(values, field.value)
+		}
 	}
-	for _, tag := range m.Tags {
-		slug := slugify(tag)
-		tagID := "tag_" + slug
-		if _, err := tx.Exec(`INSERT INTO tags(id,name,slug) VALUES(?,?,?) ON CONFLICT(slug) DO NOTHING`, tagID, tag, slug); err != nil {
+	if before.UpdatedAt != m.UpdatedAt {
+		columns = append(columns, "updated_at=?")
+		values = append(values, m.UpdatedAt)
+	}
+	if len(columns) > 0 {
+		values = append(values, m.ID)
+		if _, err := tx.Exec(`UPDATE models SET `+strings.Join(columns, ",")+` WHERE id=?`, values...); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO model_tags(model_id, tag_id) VALUES(?, (SELECT id FROM tags WHERE slug = ?))`, m.ID, slug); err != nil {
+	}
+	desired := map[string]bool{}
+	for _, tag := range m.Tags {
+		slug := tagSlug(tag)
+		if slug != "" {
+			desired[slug] = true
+		}
+	}
+	rows, err := tx.Query(`SELECT tags.id,tags.slug FROM tags JOIN model_tags ON tags.id=model_tags.tag_id WHERE model_tags.model_id=?`, m.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var removed []string
+	for rows.Next() {
+		var id, slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			return err
+		}
+		if desired[slug] {
+			delete(desired, slug)
+		} else {
+			removed = append(removed, id)
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, id := range removed {
+		if _, err := tx.Exec(`DELETE FROM model_tags WHERE model_id=? AND tag_id=?`, m.ID, id); err != nil {
+			return err
+		}
+	}
+	for _, tag := range m.Tags {
+		slug := tagSlug(tag)
+		if !desired[slug] {
+			continue
+		}
+		delete(desired, slug)
+		var id string
+		err := tx.QueryRow(`SELECT id FROM tags WHERE slug=?`, slug).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			id = "tag_" + slug
+			if _, err := tx.Exec(`INSERT INTO tags(id,name,slug) VALUES(?,?,?)`, id, tag, slug); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO model_tags(model_id,tag_id) VALUES(?,?)`, m.ID, id); err != nil {
 			return err
 		}
 	}
@@ -1456,13 +1526,25 @@ func normalizeTags(tags []string) []string {
 	var out []string
 	for _, tag := range tags {
 		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[slugify(tag)] {
+		slug := tagSlug(tag)
+		if tag == "" || seen[slug] {
 			continue
 		}
-		seen[slugify(tag)] = true
+		seen[slug] = true
 		out = append(out, tag)
 	}
 	return out
+}
+
+func tagSlug(tag string) string {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	slug := slugify(tag)
+	if slug != "" || tag == "" {
+		return slug
+	}
+	sum := sha256.Sum256([]byte(tag))
+	// The underscore keeps this namespace separate from ASCII slugs.
+	return "u_" + hex.EncodeToString(sum[:])
 }
 
 func slugify(s string) string {

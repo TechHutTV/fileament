@@ -138,6 +138,10 @@ The upload screen and owner model page show preview failures separately from upl
 
 Use tags for flexible filtering and collections for curated groups. Collections retain their own ordering, descriptions, and cover models.
 
+Tag aliases such as `Tools`/`tools` and `3D Print`/`3d-print` share the first saved label. Tags containing only non-ASCII characters or symbols stay distinct, work in the tag filter, and survive catalog reconstruction. The upgrade preserves the saved label and database ID of an older tag with an empty filter key; labels previously collapsed into that tag cannot be recovered automatically.
+
+Metadata saves retain unchanged tag relationships and update search content only for changed titles, descriptions, or tag links. Modification timestamps keep their existing behavior. See [performance measurements](docs/performance.md#metadata-and-tag-updates) for measured costs and limits.
+
 Model and collection forms show when a save is pending, succeeds, or fails. You can keep editing during a save; newer edits remain in the form for your next save. Background refreshes update untouched fields without replacing your edits, and failed saves preserve the draft so you can retry. Creating a collection clears the submitted fields while keeping any newer edits for the next collection.
 
 Collection read failures distinguish missing or inaccessible collections, temporary service interruptions, and connection problems, with a retry action. Temporary refresh failures keep unsaved edits; a confirmed missing or inaccessible collection hides its editing and deletion controls.

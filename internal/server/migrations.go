@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
@@ -51,8 +51,34 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(thumbnailFileIndexMigration); err != nil {
 			return err
 		}
+		version = 5
+	}
+	if version == 5 {
+		if err := migrateEmptyTagSlug(tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`PRAGMA user_version = 6`); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+func migrateEmptyTagSlug(tx *sql.Tx) error {
+	var id, name string
+	err := tx.QueryRow(`SELECT id,name FROM tags WHERE slug=''`).Scan(&id, &name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	slug := tagSlug(name)
+	if slug == "" {
+		return nil
+	}
+	_, err = tx.Exec(`UPDATE tags SET slug=? WHERE id=?`, slug, id)
+	return err
 }
 
 const thumbnailFileIndexMigration = `

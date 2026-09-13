@@ -27,7 +27,7 @@ var indexedQueries = []struct {
 }
 
 func TestQueryIndexMigrationPlans(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3, 4, 5} {
+	for _, version := range []int{0, 1, 2, 3, 4, 5, 6} {
 		t.Run(fmt.Sprintf("from-%d", version), func(t *testing.T) {
 			db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "index.db"))+"?_pragma=foreign_keys(ON)")
 			if err != nil {
@@ -57,8 +57,13 @@ func TestQueryIndexMigrationPlans(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if version == 5 {
+			if version >= 5 {
 				if _, err := db.Exec(thumbnailFileIndexMigration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version == 6 {
+				if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
 					t.Fatal(err)
 				}
 			}
