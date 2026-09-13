@@ -8,11 +8,6 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 test('coalesces a thumbnail burst into one catalog refresh and preserves the server-selected cover', async () => {
   window.history.pushState({}, '', '/');
-  vi.stubGlobal('IntersectionObserver', class {
-    constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
-    observe() { this.callback([{ isIntersecting: true }]); }
-    disconnect() {}
-  });
   const listeners = new Map<string, (event: MessageEvent) => void>();
   const close = vi.fn();
   vi.stubGlobal('EventSource', class {

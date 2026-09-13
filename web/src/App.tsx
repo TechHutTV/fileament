@@ -231,7 +231,7 @@ function ModelCard({ model }: { model: ModelSummary }) {
   const file = model.files[0];
   return (
     <a className="card" href={`/models/${model.id}`}>
-      <div className="thumb">{src ? <LazyImage src={src} alt={`${model.title} thumbnail`} /> : <Box size={42} aria-hidden />}{file && <span className="card-format">{file.format.toUpperCase()}</span>}</div>
+      <div className="thumb">{src ? <img src={src} alt={`${model.title} thumbnail`} loading="lazy" /> : <Box size={42} aria-hidden />}{file && <span className="card-format">{file.format.toUpperCase()}</span>}</div>
       <div className="card-body"><h2>{model.title}</h2><p className="card-meta"><span>{formatBytes(model.totalBytes)}</span>{file && <span>{file.triangleCount.toLocaleString()} tris</span>}</p></div>
     </a>
   );
@@ -997,18 +997,6 @@ function UploadInline({ label, path, onDone }: { label: string; path: string; on
   const input = useRef<HTMLInputElement>(null);
   const mutation = useMutation({ mutationFn: async () => { if (!file) return null; const fd = new FormData(); fd.append('file', file); return api(path, { method: 'POST', body: fd }); }, onSuccess: (value) => { setFile(null); if (input.current) input.current.value = ''; onDone(value); } });
   return <form className="upload compact-upload" onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}><label className="compact-picker"><input ref={input} className="visually-hidden" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /><span><Plus size={16} /><span title={file?.name}>{file?.name || label}</span></span></label><button type="submit" disabled={!file || mutation.isPending}><Upload size={17} />{mutation.isPending ? 'Uploading' : 'Upload'}</button>{mutation.isError && <p className="error">Upload failed</p>}</form>;
-}
-
-function LazyImage({ src, alt }: { src: string; alt: string }) {
-  const ref = useRef<HTMLImageElement>(null);
-  useEffect(() => {
-    const img = ref.current;
-    if (!img) return;
-    const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) { img.src = src; observer.disconnect(); } });
-    observer.observe(img);
-    return () => observer.disconnect();
-  }, [src]);
-  return <img ref={ref} alt={alt} loading="lazy" />;
 }
 
 function Markdown({ text }: { text: string }) {
