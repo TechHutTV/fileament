@@ -790,15 +790,10 @@ func (a *App) serveModelFile(w http.ResponseWriter, r *http.Request, attachment 
 	if attachment {
 		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
 	}
-	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	http.ServeFile(w, r, path)
+	a.serveModelAsset(w, r, modelID, rel)
 }
 
 func (a *App) handleOwnerImage(w http.ResponseWriter, r *http.Request) {
@@ -809,12 +804,7 @@ func (a *App) handleOwnerImage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path, err := containedPath(filepath.Join(a.cfg.DataDir, "models", modelID), rel)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	http.ServeFile(w, r, path)
+	a.serveModelAsset(w, r, modelID, rel)
 }
 
 func (a *App) handleSetThumb(w http.ResponseWriter, r *http.Request) {

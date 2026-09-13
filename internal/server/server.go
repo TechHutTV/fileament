@@ -25,6 +25,7 @@ import (
 type App struct {
 	cfg                 config.Config
 	db                  *sql.DB
+	dataRoot            *os.Root
 	webFS               fs.FS
 	dataMu              sync.RWMutex
 	modelPersistMu      sync.Mutex
@@ -69,13 +70,19 @@ func New(cfg config.Config, webFS fs.FS) (*App, error) {
 	if err := storage.EnsureLayout(cfg.DataDir); err != nil {
 		return nil, err
 	}
-	db, err := openDatabase(cfg.DataDir)
+	dataRoot, err := os.OpenRoot(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
-	app := &App{cfg: cfg, db: db, webFS: webFS, stop: make(chan struct{}), thumbWake: make(chan struct{}, 1), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
+	db, err := openDatabase(cfg.DataDir)
+	if err != nil {
+		_ = dataRoot.Close()
+		return nil, err
+	}
+	app := &App{cfg: cfg, db: db, dataRoot: dataRoot, webFS: webFS, stop: make(chan struct{}), thumbWake: make(chan struct{}, 1), events: map[chan ThumbnailEvent]struct{}{}, eventsReset: make(chan struct{})}
 	if err := app.initializeData(); err != nil {
 		_ = db.Close()
+		_ = dataRoot.Close()
 		return nil, err
 	}
 	app.backupCtx, app.backupCancel = context.WithCancel(context.Background())
@@ -90,10 +97,14 @@ func (a *App) Close() error {
 	backupErr := a.clearPreparedBackup()
 	a.backupMu.Unlock()
 	a.stopWorkers()
-	if a.db != nil {
-		return errors.Join(backupErr, a.db.Close())
+	var rootErr error
+	if a.dataRoot != nil {
+		rootErr = a.dataRoot.Close()
 	}
-	return backupErr
+	if a.db != nil {
+		return errors.Join(backupErr, rootErr, a.db.Close())
+	}
+	return errors.Join(backupErr, rootErr)
 }
 
 func (a *App) Router() http.Handler {

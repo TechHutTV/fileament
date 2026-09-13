@@ -517,12 +517,7 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path, err := containedName(filepath.Join(a.cfg.DataDir, "models", modelID, "thumbs"), name)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	http.ServeFile(w, r, path)
+	a.serveModelAsset(w, r, modelID, "thumbs/"+name)
 }
 
 func (a *App) thumbAllowed(ctx context.Context, modelID, name string) bool {
