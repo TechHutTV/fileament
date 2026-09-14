@@ -55,6 +55,8 @@ func TestAuthenticationRejectsOversizedInput(t *testing.T) {
 
 func TestAuthenticationLimitsAttemptsAcrossForwardedAddresses(t *testing.T) {
 	app := newAuthedTestApp(t)
+	frozen := time.Now()
+	app.authLimits.now = func() time.Time { return frozen }
 	for i := 0; i < 11; i++ {
 		req := jsonReq(http.MethodPost, "/api/auth/login", `{"password":"wrong"}`)
 		req.Header.Set("X-Forwarded-For", fmt.Sprintf("192.0.2.%d", i+1))

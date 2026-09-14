@@ -205,9 +205,11 @@ func (a *App) validSession(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
-	if a.db == nil || a.pruneExpiredSessions(time.Now()) != nil {
+	if a.db == nil {
 		return false
 	}
+	// Pruning is throttled housekeeping; the expires_at lookup below decides validity on its own.
+	_ = a.pruneExpiredSessions(time.Now())
 	var expires int64
 	if err := a.db.QueryRow(`SELECT expires_at FROM sessions WHERE token = ?`, c.Value).Scan(&expires); err != nil {
 		return false

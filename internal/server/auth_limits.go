@@ -27,6 +27,14 @@ type authenticationLimiter struct {
 	active int
 	tokens float64
 	last   time.Time
+	now    func() time.Time // nil means time.Now; tests inject a controlled clock
+}
+
+func (l *authenticationLimiter) currentTime() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
 }
 
 func (l *authenticationLimiter) acquire(now time.Time) time.Duration {
@@ -70,7 +78,7 @@ func (a *App) authenticationLimitsMiddleware(next http.Handler) http.Handler {
 			writeAuthInputError(w, r, http.StatusRequestEntityTooLarge, errors.New("authentication request is too large"))
 			return
 		}
-		if retry := a.authLimits.acquire(time.Now()); retry > 0 {
+		if retry := a.authLimits.acquire(a.authLimits.currentTime()); retry > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
 			writeAuthInputError(w, r, http.StatusTooManyRequests, errors.New("too many authentication attempts; retry later"))
 			return

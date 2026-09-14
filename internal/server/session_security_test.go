@@ -231,6 +231,25 @@ func TestExpiredSessionsArePrunedWithoutTheirCookies(t *testing.T) {
 	}
 }
 
+func TestValidSessionSurvivesPruneFailure(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	now := time.Now()
+	if _, err := app.db.Exec(`INSERT INTO sessions(token, expires_at) VALUES('expired-test-session', ?)`, now.Add(-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`CREATE TRIGGER block_session_prune BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'prune blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	app.lastSessionCleanup.Store(now.Add(-2 * time.Hour).Unix())
+	if status := sessionTestStatus(app, cookie); status != http.StatusOK {
+		t.Fatalf("valid session rejected while pruning failed: status=%d", status)
+	}
+	if countSessions(t, app) != 2 {
+		t.Fatal("prune was expected to fail and leave the expired session in place")
+	}
+}
+
 func changeTestPassword(app *App, cookie *http.Cookie) *httptest.ResponseRecorder {
 	req := jsonReq(http.MethodPost, "/api/auth/password", `{"currentPassword":"password-password","newPassword":"replacement-password"}`)
 	req.AddCookie(cookie)
