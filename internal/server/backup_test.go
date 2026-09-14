@@ -39,7 +39,7 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	if err := os.WriteFile(filepath.Join(app.cfg.DataDir, "future", "state.bin"), []byte("future state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{"tmp", "backups", ".restore"} {
+	for _, dir := range []string{"tmp", "backups", ".restore", ".mutations"} {
 		if err := os.MkdirAll(filepath.Join(app.cfg.DataDir, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -55,8 +55,8 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	if rec.Code != http.StatusOK {
 		t.Fatalf("backup status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("Cache-Control=%q want no-store", got)
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control=%q want private, no-store", got)
 	}
 	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, ".fileament") {
 		t.Fatalf("Content-Disposition=%q", got)
@@ -69,7 +69,7 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	entries := map[string]*zip.File{}
 	for _, entry := range zr.File {
 		entries[entry.Name] = entry
-		if strings.HasPrefix(entry.Name, "data/tmp/") || strings.HasPrefix(entry.Name, "data/backups/") || strings.HasPrefix(entry.Name, "data/.restore/") {
+		if strings.HasPrefix(entry.Name, "data/tmp/") || strings.HasPrefix(entry.Name, "data/backups/") || strings.HasPrefix(entry.Name, "data/.restore/") || strings.HasPrefix(entry.Name, "data/.mutations/") {
 			t.Fatalf("backup contains transient entry %q", entry.Name)
 		}
 	}
@@ -98,7 +98,7 @@ func TestBackupDownloadCapturesPersistentDataAndOmitsTransientState(t *testing.T
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.BackupFormatVersion != 1 || manifest.DataFormatVersion != 1 || manifest.DatabaseVersion != 1 {
+	if manifest.BackupFormatVersion != 1 || manifest.DataFormatVersion != 1 || manifest.DatabaseVersion != schemaVersion {
 		t.Fatalf("unexpected manifest versions: %+v", manifest)
 	}
 	if manifest.Models != 1 || manifest.Files != 1 || manifest.Collections != 1 {
@@ -155,7 +155,7 @@ func TestRestoreInspectStagesValidBackupWithoutChangingLibrary(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("inspect status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("Cache-Control") != "no-store" {
+	if rec.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("inspect cache control=%q", rec.Header().Get("Cache-Control"))
 	}
 	var result struct {
@@ -284,6 +284,7 @@ func TestRestoreInspectRejectsUnsafeAndUnsupportedArchives(t *testing.T) {
 		{name: "traversal", entries: []testZipEntry{{Name: "manifest.json", Data: validManifest}, {Name: "data/../../outside", Data: []byte("escape")}}},
 		{name: "symlink", entries: []testZipEntry{{Name: "manifest.json", Data: validManifest}, {Name: "data/link", Data: []byte("target"), Mode: os.ModeSymlink | 0o777}}},
 		{name: "reserved restore path", entries: []testZipEntry{{Name: "manifest.json", Data: validManifest}, {Name: "data/.restore/state.json", Data: []byte("unsafe")}}},
+		{name: "reserved mutation path", entries: []testZipEntry{{Name: "manifest.json", Data: validManifest}, {Name: "data/.mutations/state.json", Data: []byte("unsafe")}}},
 		{name: "sqlite auxiliary file", entries: []testZipEntry{{Name: "manifest.json", Data: validManifest}, {Name: "data/fileament.db-wal", Data: []byte("unsafe")}}},
 		{name: "future format", entries: []testZipEntry{{Name: "manifest.json", Data: futureManifest}, {Name: "data/fileament.db", Data: []byte("not reached")}}},
 	}

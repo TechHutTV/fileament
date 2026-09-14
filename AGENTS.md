@@ -83,12 +83,13 @@ The README API summary may lag a newly added route. Update it when API behavior 
 2. initializes the `/data` layout
 3. opens SQLite with foreign keys enabled and a busy timeout
 4. applies schema migrations
-5. optionally seeds the owner password
-6. rebuilds models from `model.json` sidecars
-7. rebuilds collections from `collections.json`
-8. refreshes the thumbnail render version and queues required work
-9. recovers interrupted thumbnail jobs
-10. starts configured background workers
+5. recovers interrupted model and collection mutations
+6. optionally seeds the owner password
+7. rebuilds models from `model.json` sidecars
+8. rebuilds collections from `collections.json`
+9. refreshes the thumbnail render version and queues required work
+10. recovers interrupted thumbnail jobs
+11. starts configured background workers
 
 Changing this order can affect recovery and durability. Add focused startup tests when changing it.
 
@@ -119,6 +120,7 @@ The frontend uses same-origin requests and cookies. There is no separate CORS-en
   fileament.db
   collections.json
   tmp/
+  .mutations/
   models/
     <model-id>/
       model.json
@@ -138,6 +140,7 @@ Important invariants:
 - Stored relative paths use slash-normalized values. Resolve them with `containedPath` or `containedName` before filesystem access.
 - Model/file deletion must remove database rows, sidecar references, jobs, and owned files consistently.
 - Upload failures must not leave partially visible models.
+- Catalog mutations use the recovery guard in `mutations.go`; keep the prior snapshot until commit or rollback is durable. Preserve immutable files so snapshot hardlinks remain valid. Do not clear mutation maintenance from another operation or include its workspace in a backup/restore payload.
 
 When changing persistence:
 
@@ -204,7 +207,7 @@ Thumbnail work is persisted in the `jobs` table and processed by configured work
 
 ## Backend conventions
 
-- Go version: 1.23; module toolchain: Go 1.23.12.
+- Minimum Go version: 1.26.8; production and CI use the same patched toolchain.
 - Prefer the standard library and current dependencies. New dependencies need a concrete benefit.
 - Keep HTTP handlers thin enough to test through `httptest`, but do not create abstraction layers without repeated need.
 - Use Chi route groups and middleware consistently.
@@ -262,7 +265,7 @@ npm run build
 The maintainer host may not have Go installed. Use the repository’s CI-equivalent container command from the repository root:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine \
+docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine \
   sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/"); go vet $(go list ./... | grep -v "/node_modules/")'
 ```
 

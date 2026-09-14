@@ -1,14 +1,49 @@
 package render
 
 import (
+	"context"
+	"errors"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/TechHutTV/fileament/internal/mesh"
 )
+
+func TestRenderLimitsAndCancellationPreserveExistingThumbnail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "thumb.png")
+	if err := os.WriteFile(path, []byte("existing thumbnail"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenderPNG(nil, path, 2049); err == nil {
+		t.Fatal("accepted oversized render")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := RenderPNGContext(ctx, nil, path, 128); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled render = %v", err)
+	}
+	tris := make([]mesh.Triangle, 100_000)
+	for i := range tris {
+		tris[i] = mesh.Triangle{A: mesh.Vec3{}, B: mesh.Vec3{X: 10}, C: mesh.Vec3{Y: 10}}
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := RenderPNGContext(ctx, tris, path, 512); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overdraw render = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "existing thumbnail" {
+		t.Fatalf("failed render changed existing output: %q, %v", data, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("temporary output leaked: %v, %v", entries, err)
+	}
+}
 
 func TestDrawShadowUsesValidTranslucentPixels(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 128, 128))

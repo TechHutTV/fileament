@@ -5,13 +5,13 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -34,6 +34,9 @@ func (a *App) seedOwnerPassword() error {
 	exists, err := a.ownerExists()
 	if err != nil || exists || a.cfg.OwnerPassword == "" {
 		return err
+	}
+	if err := validateNewPassword(a.cfg.OwnerPassword); err != nil {
+		return fmt.Errorf("invalid FILEAMENT_OWNER_PASSWORD: %w", err)
 	}
 	hash, err := hashPassword(a.cfg.OwnerPassword)
 	if err != nil {
@@ -72,12 +75,11 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req passwordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) {
 		return
 	}
-	if len(req.Password) < 12 {
-		writeError(w, http.StatusBadRequest, errors.New("password must be at least 12 characters"))
+	if err := validateNewPassword(req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	hash, err := hashPassword(req.Password)
@@ -94,8 +96,11 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req passwordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.Password) {
+		return
+	}
+	if err := a.pruneExpiredSessions(time.Now()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	var encoded string
@@ -112,31 +117,34 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return
 	}
-	token, err := randomToken(32)
+	session, err := a.createOwnerSession(encoded)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, errSessionStateChanged) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
 		return
 	}
-	expires := time.Now().Add(30 * 24 * time.Hour)
-	if _, err := a.db.Exec(`INSERT INTO sessions(token, expires_at) VALUES(?, ?)`, token, expires.Unix()); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   a.secureCookies(r),
-	})
+	a.setOwnerSessionCookie(w, r, session)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		_, _ = a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		result, err := a.db.Exec(`DELETE FROM sessions WHERE token = ?`, c.Value)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if changed > 0 {
+			a.resetEventStreams()
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(r)})
 	w.WriteHeader(http.StatusNoContent)
@@ -144,12 +152,11 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	var req changePasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeAuthJSON(w, r, &req) || !authPasswordSizeAllowed(w, req.CurrentPassword) {
 		return
 	}
-	if len(req.NewPassword) < 12 {
-		writeError(w, http.StatusBadRequest, errors.New("password must be at least 12 characters"))
+	if err := validateNewPassword(req.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	var encoded string
@@ -167,10 +174,21 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := a.db.Exec(`UPDATE settings SET value = ? WHERE key = ?`, hash, ownerHashKey); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, errSessionStateChanged)
 		return
 	}
+	session, err := a.rotateOwnerPassword(encoded, hash, cookie.Value)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errSessionStateChanged) {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return
+	}
+	a.setOwnerSessionCookie(w, r, session)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -187,6 +205,11 @@ func (a *App) validSession(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
+	if a.db == nil {
+		return false
+	}
+	// Pruning is throttled housekeeping; the expires_at lookup below decides validity on its own.
+	_ = a.pruneExpiredSessions(time.Now())
 	var expires int64
 	if err := a.db.QueryRow(`SELECT expires_at FROM sessions WHERE token = ?`, c.Value).Scan(&expires); err != nil {
 		return false
@@ -219,6 +242,16 @@ func (a *App) requireDataAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validateNewPassword(password string) error {
+	if err := validatePasswordSize(password); err != nil {
+		return err
+	}
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 12 {
+		return errors.New("password must be at least 12 Unicode characters")
+	}
+	return nil
 }
 
 func hashPassword(password string) (string, error) {

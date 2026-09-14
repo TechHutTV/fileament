@@ -28,15 +28,23 @@ jobs:
 
       - name: Go test
         run: |
-          docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/")'
+          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go test $(go list ./... | grep -v "/node_modules/")'
 
       - name: Go vet
         run: |
-          docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go vet $(go list ./... | grep -v "/node_modules/")'
+          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go vet $(go list ./... | grep -v "/node_modules/")'
+
+      - name: Go vulnerability scan
+        run: |
+          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.26.8-alpine sh -lc 'export PATH="/usr/local/go/bin:$PATH"; go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/... ./internal/...'
 
       - name: Frontend install
         working-directory: web
         run: npm ci
+
+      - name: Frontend vulnerability scan
+        working-directory: web
+        run: npm audit --audit-level=low
 
       - name: Frontend lint
         working-directory: web

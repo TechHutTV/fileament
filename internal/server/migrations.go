@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
@@ -27,9 +27,36 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(`PRAGMA user_version = 1`); err != nil {
 			return err
 		}
+		version = 1
+	}
+	if version == 1 {
+		if _, err := tx.Exec(jobLifecycleMigration); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
+
+const jobLifecycleMigration = `
+CREATE TABLE jobs_v2 (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  status TEXT NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+INSERT INTO jobs_v2(id,type,file_id,status,attempts,error,created_at,finished_at)
+SELECT id,type,file_id,status,attempts,error,created_at,
+  CASE WHEN status IN ('done','failed') THEN unixepoch() ELSE NULL END
+FROM jobs WHERE file_id IN (SELECT id FROM files);
+DROP TABLE jobs;
+ALTER TABLE jobs_v2 RENAME TO jobs;
+CREATE INDEX jobs_terminal_finished ON jobs(finished_at DESC, id DESC) WHERE status IN ('done','failed');
+PRAGMA user_version = 2;
+`
 
 const schema = `
 CREATE TABLE IF NOT EXISTS models (

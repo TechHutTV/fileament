@@ -29,6 +29,7 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           app.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

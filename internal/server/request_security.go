@@ -1,0 +1,57 @@
+package server
+
+import (
+	"errors"
+	"mime"
+	"net/http"
+	"strings"
+)
+
+func browserSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func sensitiveCachePolicy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, prefix := range []string{"/api/", "/files/", "/mesh/", "/images/", "/thumbs/", "/s/"} {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				w.Header().Set("Cache-Control", "private, no-store")
+				break
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func protectBrowserOrigin(next http.Handler) http.Handler {
+	protection := http.NewCrossOriginProtection()
+	protection.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rejectRequest(w, r, http.StatusForbidden, "cross-origin mutations are not allowed")
+	}))
+	return protection.Handler(next)
+}
+
+func requireJSON(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			rejectRequest(w, r, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func rejectRequest(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if r.ProtoMajor == 1 {
+		// Reject without draining an attacker-controlled request body.
+		w.Header().Set("Connection", "close")
+	}
+	writeError(w, status, errors.New(message))
+}

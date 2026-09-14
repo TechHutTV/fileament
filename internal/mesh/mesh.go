@@ -3,9 +3,11 @@ package mesh
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -38,26 +40,56 @@ type Stats struct {
 }
 
 func ParseFile(path string) (Stats, []Triangle, error) {
-	if st, err := os.Stat(path); err != nil {
+	return ParseFileContext(context.Background(), path)
+}
+
+func ParseFileContext(ctx context.Context, path string) (Stats, []Triangle, error) {
+	ctx, cancel := context.WithTimeout(ctx, maxParserDuration)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
 		return Stats{}, nil, err
-	} else if st.Size() <= 0 {
+	}
+	select {
+	case parserSlots <- struct{}{}:
+		defer func() { <-parserSlots }()
+	case <-ctx.Done():
+		return Stats{}, nil, ctx.Err()
+	}
+	return parseFileWithLimits(ctx, path, defaultParserLimits())
+}
+
+func parseFileWithLimits(ctx context.Context, path string, limits parserLimits) (Stats, []Triangle, error) {
+	if st, err := os.Lstat(path); err != nil {
+		return Stats{}, nil, err
+	} else if !st.Mode().IsRegular() {
+		return Stats{}, nil, errors.New("mesh must be a regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Stats{}, nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return Stats{}, nil, err
+	} else if !st.Mode().IsRegular() || st.Size() <= 0 {
 		return Stats{}, nil, errors.New("mesh is empty")
 	} else if st.Size() > maxParserBytes {
 		return Stats{}, nil, errors.New("mesh exceeds parser size limit")
 	}
 	var format string
 	var tris []Triangle
-	var err error
+	r := contextReader{ctx: ctx, r: io.NewSectionReader(f, 0, st.Size())}
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
 	case "stl":
 		format = "stl"
-		tris, err = parseSTL(path)
+		tris, err = parseSTL(ctx, bufio.NewReaderSize(r, 64<<10), st.Size(), limits)
 	case "obj":
 		format = "obj"
-		tris, err = parseOBJ(path)
+		tris, err = parseOBJ(ctx, r, limits)
 	case "3mf":
 		format = "3mf"
-		tris, err = parse3MF(path)
+		tris, err = parse3MF(ctx, f, st.Size(), limits)
 	default:
 		return Stats{}, nil, errors.New("unsupported mesh format")
 	}
@@ -67,7 +99,14 @@ func ParseFile(path string) (Stats, []Triangle, error) {
 	if len(tris) == 0 {
 		return Stats{}, nil, errors.New("mesh contains no triangles")
 	}
-	return stats(format, tris), tris, nil
+	result := stats(format, tris)
+	if err := ctx.Err(); err != nil {
+		return Stats{}, nil, err
+	}
+	if !finite(result.BBoxX) || !finite(result.BBoxY) || !finite(result.BBoxZ) {
+		return Stats{}, nil, errors.New("invalid mesh bounds")
+	}
+	return result, tris, nil
 }
 
 func stats(format string, tris []Triangle) Stats {
@@ -89,40 +128,47 @@ func stats(format string, tris []Triangle) Stats {
 	return Stats{Format: format, TriangleCount: len(tris), BBoxX: max.X - min.X, BBoxY: max.Y - min.Y, BBoxZ: max.Z - min.Z}
 }
 
-func parseSTL(path string) ([]Triangle, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+func parseSTL(ctx context.Context, r io.Reader, size int64, limits parserLimits) ([]Triangle, error) {
+	header := make([]byte, 84)
+	read, err := io.ReadFull(r, header)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, err
 	}
-	if len(data) >= 84 {
-		n := binary.LittleEndian.Uint32(data[80:84])
+	header = header[:read]
+	if len(header) == 84 {
+		n := binary.LittleEndian.Uint32(header[80:84])
 		want := int64(84) + int64(n)*50
-		if want == int64(len(data)) {
+		if want == size {
+			if uint64(n) > uint64(limits.triangles) {
+				return nil, errMeshLimit
+			}
 			tris := make([]Triangle, 0, n)
-			off := 84
+			var facet [50]byte
 			for i := uint32(0); i < n; i++ {
-				if off+50 > len(data) {
-					return nil, errors.New("truncated binary stl")
+				if err := ctx.Err(); err != nil {
+					return nil, err
 				}
-				off += 12
-				a := readVec(data[off:])
-				off += 12
-				b := readVec(data[off:])
-				off += 12
-				c := readVec(data[off:])
-				off += 14
-				tris = append(tris, Triangle{A: a, B: b, C: c})
+				if _, err := io.ReadFull(r, facet[:]); err != nil {
+					return nil, err
+				}
+				tris, err = appendTriangle(tris, Triangle{A: readVec(facet[12:]), B: readVec(facet[24:]), C: readVec(facet[36:])}, limits.triangles)
+				if err != nil {
+					return nil, err
+				}
 			}
 			return tris, nil
-		} else if n > 0 && want > int64(len(data)) && !bytes.HasPrefix(bytes.TrimSpace(data[:min(len(data), 80)]), []byte("solid")) {
+		} else if n > 0 && want > size && !bytes.HasPrefix(bytes.TrimSpace(header[:80]), []byte("solid")) {
 			return nil, errors.New("truncated binary stl")
 		}
 	}
 	var tris []Triangle
 	var verts []Vec3
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	sc := bufio.NewScanner(io.MultiReader(bytes.NewReader(header), r))
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 4 && strings.EqualFold(fields[0], "vertex") {
 			v, err := parseVec(fields[1], fields[2], fields[3])
@@ -131,7 +177,10 @@ func parseSTL(path string) ([]Triangle, error) {
 			}
 			verts = append(verts, v)
 			if len(verts) == 3 {
-				tris = append(tris, Triangle{A: verts[0], B: verts[1], C: verts[2]})
+				tris, err = appendTriangle(tris, Triangle{A: verts[0], B: verts[1], C: verts[2]}, limits.triangles)
+				if err != nil {
+					return nil, err
+				}
 				verts = nil
 			}
 		}
@@ -153,23 +202,24 @@ func readVec(b []byte) Vec3 {
 	}
 }
 
-func parseOBJ(path string) ([]Triangle, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
+func parseOBJ(ctx context.Context, r io.Reader, limits parserLimits) ([]Triangle, error) {
 	var verts []Vec3
 	var tris []Triangle
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 0 {
 			continue
 		}
 		switch fields[0] {
 		case "v":
+			if len(verts) >= limits.vertices {
+				return nil, errMeshLimit
+			}
 			if len(fields) < 4 {
 				continue
 			}
@@ -181,6 +231,9 @@ func parseOBJ(path string) ([]Triangle, error) {
 		case "f":
 			if len(fields) < 4 {
 				continue
+			}
+			if len(fields)-3 > limits.triangles-len(tris) {
+				return nil, errMeshLimit
 			}
 			var idx []int
 			for _, field := range fields[1:] {
@@ -198,28 +251,40 @@ func parseOBJ(path string) ([]Triangle, error) {
 				idx = append(idx, n-1)
 			}
 			for i := 1; i+1 < len(idx); i++ {
-				tris = append(tris, Triangle{A: verts[idx[0]], B: verts[idx[i]], C: verts[idx[i+1]]})
+				var err error
+				tris, err = appendTriangle(tris, Triangle{A: verts[idx[0]], B: verts[idx[i]], C: verts[idx[i+1]]}, limits.triangles)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
 	return tris, sc.Err()
 }
 
-func parse3MF(path string) ([]Triangle, error) {
-	r, err := go3mf.OpenReader(path)
+func parse3MF(ctx context.Context, r io.ReaderAt, size int64, limits parserLimits) ([]Triangle, error) {
+	model, err := decode3MF(ctx, r, size, limits)
 	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	model := new(go3mf.Model)
-	if err := r.Decode(model); err != nil {
 		return nil, err
 	}
 	scale := unitScale(model.Units)
 	var tris []Triangle
 	active := map[string]bool{}
-	var appendObject func(string, uint32, go3mf.Matrix) error
-	appendObject = func(objectPath string, objectID uint32, transform go3mf.Matrix) error {
+	instances := 0
+	var appendObject func(string, uint32, go3mf.Matrix, int) error
+	appendObject = func(objectPath string, objectID uint32, transform go3mf.Matrix, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		instances++
+		if instances > limits.instances || depth > limits.depth {
+			return errMeshLimit
+		}
+		for _, value := range transform {
+			if !finite(float64(value)) {
+				return errors.New("invalid 3mf transform")
+			}
+		}
 		key := fmt.Sprintf("%s#%d", objectPath, objectID)
 		if active[key] {
 			return errors.New("3mf component cycle")
@@ -232,21 +297,30 @@ func parse3MF(path string) ([]Triangle, error) {
 		}
 		transform = matrixOrIdentity(transform)
 		if object.Mesh != nil {
+			if len(object.Mesh.Triangles) > limits.triangles-len(tris) {
+				return errMeshLimit
+			}
 			for _, triangle := range object.Mesh.Triangles {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				i1, i2, i3 := triangle.Indices()
 				if i1 >= uint32(len(object.Mesh.Vertices)) || i2 >= uint32(len(object.Mesh.Vertices)) || i3 >= uint32(len(object.Mesh.Vertices)) {
 					return errors.New("3mf triangle index out of range")
 				}
-				tris = append(tris, Triangle{
+				tris, err = appendTriangle(tris, Triangle{
 					A: transformedPoint(object.Mesh.Vertices[i1], transform, scale),
 					B: transformedPoint(object.Mesh.Vertices[i2], transform, scale),
 					C: transformedPoint(object.Mesh.Vertices[i3], transform, scale),
-				})
+				}, limits.triangles)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		for _, component := range object.Components {
 			componentTransform := matrixOrIdentity(component.Transform)
-			if err := appendObject(component.ObjectPath(objectPath), component.ObjectID, transform.Mul(componentTransform)); err != nil {
+			if err := appendObject(component.ObjectPath(objectPath), component.ObjectID, transform.Mul(componentTransform), depth+1); err != nil {
 				return err
 			}
 		}
@@ -255,7 +329,7 @@ func parse3MF(path string) ([]Triangle, error) {
 	if len(model.Build.Items) == 0 {
 		for _, object := range model.Resources.Objects {
 			if object.Mesh != nil {
-				if err := appendObject("", object.ID, go3mf.Identity()); err != nil {
+				if err := appendObject("", object.ID, go3mf.Identity(), 1); err != nil {
 					return nil, err
 				}
 			}
@@ -263,7 +337,7 @@ func parse3MF(path string) ([]Triangle, error) {
 		return tris, nil
 	}
 	for _, item := range model.Build.Items {
-		if err := appendObject(item.ObjectPath(), item.ObjectID, matrixOrIdentity(item.Transform)); err != nil {
+		if err := appendObject(item.ObjectPath(), item.ObjectID, matrixOrIdentity(item.Transform), 1); err != nil {
 			return nil, err
 		}
 	}
@@ -312,5 +386,9 @@ func parseVec(x, y, z string) (Vec3, error) {
 	if err != nil {
 		return Vec3{}, err
 	}
-	return Vec3{X: xf, Y: yf, Z: zf}, nil
+	v := Vec3{X: xf, Y: yf, Z: zf}
+	if !validPoint(v) {
+		return Vec3{}, errors.New("invalid mesh coordinates")
+	}
+	return v, nil
 }

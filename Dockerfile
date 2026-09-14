@@ -5,15 +5,16 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
-ENV PATH="/usr/local/go/bin:${PATH}"
+ENV PATH="/usr/local/go/bin:${PATH}" GOTOOLCHAIN=local
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /web/dist ./cmd/fileament/dist
+RUN CGO_ENABLED=0 go test -tags embedded_ui ./cmd/fileament
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags embedded_ui -ldflags="-s -w" -o /fileament ./cmd/fileament
 
 FROM gcr.io/distroless/static

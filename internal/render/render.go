@@ -1,11 +1,15 @@
 package render
 
 import (
+	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/TechHutTV/fileament/internal/mesh"
 )
@@ -15,15 +19,30 @@ type point struct {
 }
 
 func RenderPNG(tris []mesh.Triangle, path string, size int) error {
+	return RenderPNGContext(context.Background(), tris, path, size)
+}
+
+func RenderPNGContext(ctx context.Context, tris []mesh.Triangle, path string, size int) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if size <= 0 {
 		size = 512
 	}
+	if size > 2048 || len(tris) > 1_000_000 {
+		return errors.New("thumbnail exceeds render limits")
+	}
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	if len(tris) == 0 {
-		return encodePNG(path, img)
+		return encodePNG(ctx, path, img)
 	}
 	drawShadow(img)
-	center, scale := bounds(tris)
+	center, scale, err := bounds(ctx, tris)
+	if err != nil {
+		return err
+	}
 	zbuf := make([]float64, size*size)
 	for i := range zbuf {
 		zbuf[i] = math.Inf(-1)
@@ -31,6 +50,9 @@ func RenderPNG(tris []mesh.Triangle, path string, size int) error {
 	key := normalize(point{x: -0.45, y: -0.55, z: 1})
 	fill := normalize(point{x: 0.7, y: 0.1, z: 0.65})
 	for _, tri := range tris {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		av := view(norm(tri.A, center, scale))
 		bv := view(norm(tri.B, center, scale))
 		cv := view(norm(tri.C, center, scale))
@@ -40,9 +62,11 @@ func RenderPNG(tris []mesh.Triangle, path string, size int) error {
 		}
 		n = normalize(n)
 		shade := 0.2 + 0.58*math.Max(0, dot(n, key)) + 0.18*math.Max(0, dot(n, fill)) + 0.08*math.Pow(1-math.Abs(n.z), 2)
-		fillTriangle(img, zbuf, project(av, size), project(bv, size), project(cv, size), math.Min(1, shade))
+		if err := fillTriangle(ctx, img, zbuf, project(av, size), project(bv, size), project(cv, size), math.Min(1, shade)); err != nil {
+			return err
+		}
 	}
-	return encodePNG(path, img)
+	return encodePNG(ctx, path, img)
 }
 
 func drawShadow(img *image.RGBA) {
@@ -66,11 +90,19 @@ func drawShadow(img *image.RGBA) {
 	}
 }
 
-func bounds(tris []mesh.Triangle) (mesh.Vec3, float64) {
+func bounds(ctx context.Context, tris []mesh.Triangle) (mesh.Vec3, float64, error) {
 	min := mesh.Vec3{X: math.MaxFloat64, Y: math.MaxFloat64, Z: math.MaxFloat64}
 	max := mesh.Vec3{X: -math.MaxFloat64, Y: -math.MaxFloat64, Z: -math.MaxFloat64}
 	for _, tri := range tris {
+		if err := ctx.Err(); err != nil {
+			return mesh.Vec3{}, 0, err
+		}
 		for _, v := range []mesh.Vec3{tri.A, tri.B, tri.C} {
+			for _, coordinate := range []float64{v.X, v.Y, v.Z} {
+				if math.IsNaN(coordinate) || math.IsInf(coordinate, 0) || math.Abs(coordinate) > 1e12 {
+					return mesh.Vec3{}, 0, errors.New("invalid render coordinates")
+				}
+			}
 			min.X = math.Min(min.X, v.X)
 			min.Y = math.Min(min.Y, v.Y)
 			min.Z = math.Min(min.Z, v.Z)
@@ -83,7 +115,10 @@ func bounds(tris []mesh.Triangle) (mesh.Vec3, float64) {
 	if span == 0 {
 		span = 1
 	}
-	return mesh.Vec3{X: (min.X + max.X) / 2, Y: (min.Y + max.Y) / 2, Z: (min.Z + max.Z) / 2}, 1.5 / span
+	if math.IsInf(1.5/span, 0) {
+		return mesh.Vec3{}, 0, errors.New("invalid render bounds")
+	}
+	return mesh.Vec3{X: (min.X + max.X) / 2, Y: (min.Y + max.Y) / 2, Z: (min.Z + max.Z) / 2}, 1.5 / span, nil
 }
 
 func norm(v, c mesh.Vec3, s float64) mesh.Vec3 {
@@ -106,14 +141,14 @@ func project(v point, size int) point {
 	return point{x: float64(size)/2 + v.x*scale, y: float64(size)/2 + v.y*scale, z: v.z}
 }
 
-func fillTriangle(img *image.RGBA, zbuf []float64, a, b, c point, shade float64) {
+func fillTriangle(ctx context.Context, img *image.RGBA, zbuf []float64, a, b, c point, shade float64) error {
 	minX := int(math.Max(0, math.Floor(math.Min(a.x, math.Min(b.x, c.x)))))
 	maxX := int(math.Min(float64(img.Bounds().Dx()-1), math.Ceil(math.Max(a.x, math.Max(b.x, c.x)))))
 	minY := int(math.Max(0, math.Floor(math.Min(a.y, math.Min(b.y, c.y)))))
 	maxY := int(math.Min(float64(img.Bounds().Dy()-1), math.Ceil(math.Max(a.y, math.Max(b.y, c.y)))))
 	den := (b.y-c.y)*(a.x-c.x) + (c.x-b.x)*(a.y-c.y)
 	if den == 0 {
-		return
+		return nil
 	}
 	col := color.RGBA{
 		R: uint8(24 + 75*shade),
@@ -122,6 +157,9 @@ func fillTriangle(img *image.RGBA, zbuf []float64, a, b, c point, shade float64)
 		A: 255,
 	}
 	for y := minY; y <= maxY; y++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for x := minX; x <= maxX; x++ {
 			px, py := float64(x)+0.5, float64(y)+0.5
 			w1 := ((b.y-c.y)*(px-c.x) + (c.x-b.x)*(py-c.y)) / den
@@ -138,6 +176,7 @@ func fillTriangle(img *image.RGBA, zbuf []float64, a, b, c point, shade float64)
 			}
 		}
 	}
+	return nil
 }
 
 func normal(a, b, c point) point {
@@ -158,11 +197,30 @@ func dot(a, b point) float64 {
 	return a.x*b.x + a.y*b.y + a.z*b.z
 }
 
-func encodePNG(path string, img image.Image) error {
-	f, err := os.Create(path)
+func encodePNG(ctx context.Context, path string, img image.Image) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".thumbnail-*.png")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	defer os.Remove(f.Name())
+	encodeErr := png.Encode(contextWriter{ctx: ctx, file: f}, img)
+	if err := errors.Join(encodeErr, f.Close(), ctx.Err()); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+type contextWriter struct {
+	ctx  context.Context
+	file *os.File
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.file.Write(p)
 }

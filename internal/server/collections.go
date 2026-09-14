@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,15 +50,15 @@ func (a *App) mountCollectionRoutes(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(a.requireAuth)
 		r.Get("/api/collections", a.handleListCollections)
-		r.Post("/api/collections", a.handleCreateCollection)
+		r.With(requireJSON).Post("/api/collections", a.handleCreateCollection)
 		r.Get("/api/collections/{id}", a.handleGetCollection)
-		r.Patch("/api/collections/{id}", a.handlePatchCollection)
+		r.With(requireJSON).Patch("/api/collections/{id}", a.handlePatchCollection)
 		r.Delete("/api/collections/{id}", a.handleDeleteCollection)
 		r.Put("/api/collections/{id}/models/{mid}", a.handleAddCollectionModel)
 		r.Delete("/api/collections/{id}/models/{mid}", a.handleRemoveCollectionModel)
-		r.Put("/api/collections/{id}/order", a.handleReorderCollectionModels)
+		r.With(requireJSON).Put("/api/collections/{id}/order", a.handleReorderCollectionModels)
 		r.Get("/api/shares", a.handleListShares)
-		r.Post("/api/shares", a.handleCreateShare)
+		r.With(requireJSON).Post("/api/shares", a.handleCreateShare)
 		r.Delete("/api/shares/{id}", a.handleRevokeShare)
 	})
 	r.Get("/api/public/{token}", a.handlePublic)
@@ -119,7 +118,7 @@ func (a *App) listCollections() ([]Collection, error) {
 		}
 		out = append(out, c)
 	}
-	if err := rows.Close(); err != nil {
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
 	indexes := make(map[string]int, len(out))
@@ -144,13 +143,19 @@ func (a *App) listCollections() ([]Collection, error) {
 }
 
 func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
-	a.collectionPersistMu.Lock()
-	defer a.collectionPersistMu.Unlock()
 	var req Collection
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	now := time.Now().Unix()
 	c := Collection{ID: ids.New(), Name: strings.TrimSpace(req.Name), Slug: slugify(req.Name), Description: req.Description, CoverModelID: req.CoverModelID, CreatedAt: now}
 	if c.Name == "" {
@@ -166,7 +171,6 @@ func (a *App) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.writeCollectionsSidecar(); err != nil {
-		_, _ = a.db.Exec(`DELETE FROM collections WHERE id = ?`, c.ID)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -183,14 +187,20 @@ func (a *App) handleGetCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
-	a.collectionPersistMu.Lock()
-	defer a.collectionPersistMu.Unlock()
-	id := chi.URLParam(r, "id")
 	var req Collection
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
+	id := chi.URLParam(r, "id")
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, errors.New("name is required"))
@@ -221,6 +231,12 @@ func (a *App) handlePatchCollection(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 	a.collectionPersistMu.Lock()
 	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	res, err := a.db.Exec(`DELETE FROM collections WHERE id = ?`, chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -240,6 +256,12 @@ func (a *App) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 	a.collectionPersistMu.Lock()
 	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	id, mid := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
 	if _, err := a.getCollection(id); err != nil {
 		writeError(w, http.StatusNotFound, errors.New("collection not found"))
@@ -265,6 +287,12 @@ func (a *App) handleAddCollectionModel(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request) {
 	a.collectionPersistMu.Lock()
 	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
 	id, modelID := chi.URLParam(r, "id"), chi.URLParam(r, "mid")
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -297,19 +325,25 @@ func (a *App) handleRemoveCollectionModel(w http.ResponseWriter, r *http.Request
 }
 
 func (a *App) handleReorderCollectionModels(w http.ResponseWriter, r *http.Request) {
-	a.collectionPersistMu.Lock()
-	defer a.collectionPersistMu.Unlock()
-	id := chi.URLParam(r, "id")
-	collection, err := a.getCollection(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, errors.New("collection not found"))
-		return
-	}
 	var req struct {
 		ModelIDs []string `json:"modelIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a.collectionPersistMu.Lock()
+	defer a.collectionPersistMu.Unlock()
+	w, finish, err := a.beginMutationResponse(w, "")
+	if err != nil {
+		writeError(w, mutationErrorStatus(err), err)
+		return
+	}
+	defer finish()
+	id := chi.URLParam(r, "id")
+	collection, err := a.getCollection(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("collection not found"))
 		return
 	}
 	if len(req.ModelIDs) != len(collection.ModelIDs) {
@@ -381,6 +415,9 @@ func (a *App) getCollection(idOrSlug string) (Collection, error) {
 }
 
 func (a *App) writeCollectionsSidecar() error {
+	if err := a.mutationStep("collections-sidecar"); err != nil {
+		return err
+	}
 	collections, err := a.listCollections()
 	if err != nil {
 		return err
@@ -390,11 +427,7 @@ func (a *App) writeCollectionsSidecar() error {
 		return err
 	}
 	path := filepath.Join(a.cfg.DataDir, "collections.json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicWriteFile(path, b, 0o644)
 }
 
 func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
@@ -558,6 +591,9 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request, attachmen
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	http.ServeFile(w, r, path)
 }
 

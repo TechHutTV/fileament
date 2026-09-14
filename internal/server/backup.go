@@ -36,11 +36,16 @@ type backupManifest struct {
 func (a *App) mountBackupRoutes(r chi.Router) {
 	r.With(a.requireDataAuth).Post("/api/backups", a.handleCreateBackup)
 	r.With(a.requireDataAuth).Post("/api/backups/inspect", a.handleInspectBackup)
-	r.With(a.requireDataAuth).Post("/api/backups/restore", a.handleApplyRestore)
+	r.With(a.requireDataAuth, requireJSON).Post("/api/backups/restore", a.handleApplyRestore)
 }
 
 func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	a.dataMu.Lock()
+	if a.maintenance.Load() {
+		a.dataMu.Unlock()
+		writeError(w, http.StatusServiceUnavailable, errMutationRecoveryRequired)
+		return
+	}
 	if !a.validSession(r) {
 		a.dataMu.Unlock()
 		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
@@ -66,7 +71,7 @@ func (a *App) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filename := "fileament-backup-" + strings.NewReplacer(":", "", "-", "").Replace(manifest.CreatedAt) + ".fileament"
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	http.ServeContent(w, r, filename, stat.ModTime(), file)
@@ -166,6 +171,7 @@ func addPersistentDataToBackup(zw *zip.Writer, root string) error {
 		"tmp":                  true,
 		"backups":              true,
 		".restore":             true,
+		".mutations":           true,
 	}
 	for _, entry := range entries {
 		if excluded[entry.Name()] {
