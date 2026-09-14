@@ -95,6 +95,7 @@ func TestZIPNameCollisionsPreserveDownloadsDeletionAndBackup(t *testing.T) {
 		}
 		delete(wantMeshes, got)
 	}
+	imageBodies := map[string][]byte{}
 	for _, img := range model.Images {
 		if seen[strings.ToLower(img.RelPath)] {
 			t.Fatalf("duplicate path: %s", img.RelPath)
@@ -105,6 +106,7 @@ func TestZIPNameCollisionsPreserveDownloadsDeletionAndBackup(t *testing.T) {
 			t.Fatalf("corrupted image: %s", img.RelPath)
 		}
 		delete(wantImages, response.Body.String())
+		imageBodies[img.ID] = response.Body.Bytes()
 	}
 	backup := downloadBackup(t, app, cookie)
 	inspection := inspectBackup(t, app, cookie, backup)
@@ -149,6 +151,12 @@ func TestZIPNameCollisionsPreserveDownloadsDeletionAndBackup(t *testing.T) {
 		sum := sha256.Sum256(response.Body.Bytes())
 		if response.Code != http.StatusOK || hex.EncodeToString(sum[:]) != file.SHA256 {
 			t.Fatalf("restored file changed: %s", file.Filename)
+		}
+	}
+	for _, img := range model.Images {
+		response := getWithCookie(t, app, cookie, "/images/"+model.ID+"/"+img.ID)
+		if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), imageBodies[img.ID]) {
+			t.Fatalf("restored image changed: %s", img.RelPath)
 		}
 	}
 }

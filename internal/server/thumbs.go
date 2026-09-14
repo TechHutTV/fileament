@@ -146,7 +146,20 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 		return ctx.Err()
 	}
 	a.dataMu.RLock()
-	defer a.dataMu.RUnlock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			a.dataMu.RUnlock()
+		}
+	}
+	relock := func() {
+		if !locked {
+			a.dataMu.RLock()
+			locked = true
+		}
+	}
+	defer unlock()
 	jobID, fileID, err := a.claimThumbnailJob(ctx)
 	if err != nil || jobID == "" {
 		return err
@@ -154,6 +167,7 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	claimed := true
 	defer func() {
 		if claimed && err != nil {
+			relock()
 			status := "failed"
 			if errors.Is(err, context.Canceled) || errors.Is(err, errMutationRecoveryRequired) {
 				status = "pending"
@@ -179,6 +193,9 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	// Parsing and rendering only read the mesh and write under tmp/, so release the data lock
+	// while they run; otherwise a backup waiting for the write lock stalls every request behind it.
+	unlock()
 	_, tris, err := mesh.ParseFileContext(ctx, meshPath)
 	if err != nil {
 		return err
@@ -194,6 +211,7 @@ func (a *App) processNextThumbnailContext(ctx context.Context) (err error) {
 	if err := render.RenderPNGContext(ctx, tris, prepared.Name(), 512); err != nil {
 		return err
 	}
+	relock()
 	published, err := a.publishThumbnail(ctx, jobID, fileID, modelID, relPath, prepared.Name())
 	if err != nil {
 		return err

@@ -260,7 +260,7 @@ func (m *dataMutation) rollback() error {
 	if err := m.app.rebuildFromSidecars(); err != nil {
 		return err
 	}
-	if err := m.app.rebuildCollectionsFromSidecar(); err != nil {
+	if err := m.app.syncCollectionsIndexToSidecar(true); err != nil {
 		return err
 	}
 	if err := m.writeState("rolled-back"); err != nil {

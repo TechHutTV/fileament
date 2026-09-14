@@ -58,10 +58,20 @@ func (a *App) rebuildFromSidecars() error {
 	return tx.Commit()
 }
 
+// rebuildCollectionsFromSidecar is the startup path: a missing sidecar next to indexed
+// collections means durable state was lost, so startup stops instead of discarding the index.
 func (a *App) rebuildCollectionsFromSidecar() error {
+	return a.syncCollectionsIndexToSidecar(false)
+}
+
+// syncCollectionsIndexToSidecar makes the collections index match the durable sidecar. With
+// missingMeansEmpty set, an absent sidecar is authoritative and indexed collections are removed;
+// mutation rollback relies on that after restoring a pre-mutation state that had no sidecar.
+func (a *App) syncCollectionsIndexToSidecar(missingMeansEmpty bool) error {
 	path := filepath.Join(a.cfg.DataDir, "collections.json")
 	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	missing := errors.Is(err, os.ErrNotExist)
+	if missing {
 		b, err = []byte("null"), nil
 	}
 	if err != nil {
@@ -76,6 +86,15 @@ func (a *App) rebuildCollectionsFromSidecar() error {
 		return err
 	}
 	defer tx.Rollback()
+	if missing && !missingMeansEmpty {
+		var indexed int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM collections`).Scan(&indexed); err != nil {
+			return err
+		}
+		if indexed != 0 {
+			return errors.New("collections index has entries but its durable sidecar is missing; recovery is required")
+		}
+	}
 	wanted := map[string]bool{}
 	for _, c := range collections {
 		if c.ID != "" && c.Name != "" && c.Slug != "" {

@@ -562,6 +562,25 @@ func TestMissingModelSidecarStopsStartupWithoutDiscardingIndex(t *testing.T) {
 	}
 }
 
+func TestMissingCollectionsSidecarStopsStartupWithoutDiscardingIndex(t *testing.T) {
+	app := newAuthedTestApp(t)
+	cookie := loginCookie(t, app, "password-password")
+	rec := serveMutationRequest(app, cookie, jsonReq(http.MethodPost, "/api/collections", `{"name":"Durable"}`))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create collection status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := os.Remove(filepath.Join(app.cfg.DataDir, "collections.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.rebuildCollectionsFromSidecar(); err == nil {
+		t.Fatal("missing durable collections sidecar accepted")
+	}
+	var indexed int
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM collections`).Scan(&indexed); err != nil || indexed != 1 {
+		t.Fatalf("index discarded before metadata recovery: count=%d err=%v", indexed, err)
+	}
+}
+
 func TestSharedTagLinkPreservesOtherModelsDurableLabel(t *testing.T) {
 	fixture := newMutationFixture(t)
 	app := fixture.app
